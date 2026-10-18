@@ -182,7 +182,8 @@ impl SqliteStore {
     /// 既存要約は stale にする（要約本文に話者名が出るため）。
     /// 本文は変わらないので `rec_fts` は触らない。
     ///
-    /// **戻り値は「実際に変えたか」。** 同じ話者を選び直したときは `false` を返して何もしない。
+    /// **戻り値は「実際に変えたか」。** 同じ話者を選び直したときは `false` を返し、発言も要約も
+    /// 変えない（やり直しで選択と一致した訂正の行だけは消す・ADR-0048）。
     /// 呼び出し側（UI）はこれを見て「要約が古い」の表示を出し分ける — 真偽を知っているのは
     /// ここだけなので、UI 側で現在値と比較させない（UI の値が DB と一致している前提に依存してしまう）。
     pub fn set_segment_speaker(
@@ -221,9 +222,13 @@ impl SqliteStore {
             .optional()?
             .ok_or_else(|| crate::error::CoreError::Db("error.segment.not_found".to_string()))?;
 
-        // 同じ話者を選び直しただけなら何もしない。要約を stale にすると 7B モデルでの
+        // 同じ話者を選び直しただけなら発言も要約も変えない。要約を stale にすると 7B モデルでの
         // 作り直しが分単位で走るため、内容が変わっていないのに促すのは害。
+        // ただし、やり直しの結果が選択と一致して残った行は predicted = 今の話者なので、
+        // 取り消し（predicted を選び直す）はこの経路に来る。その行だけ消す（ADR-0048）。
         if current.as_deref() == speaker_id {
+            correction::forget_confirmed(&tx, recording_id, idx, speaker_id)?;
+            tx.commit()?;
             return Ok(false);
         }
 

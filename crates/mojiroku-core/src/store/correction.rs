@@ -77,6 +77,25 @@ pub(super) fn record(
     Ok(())
 }
 
+/// やり直しの結果が利用者の選択と一致して残った行（`predicted` = `corrected` = 今の話者）を消す。
+/// 今の話者を選び直したとき（`set_segment_speaker` の同値の経路）に呼ぶ。発言は変わらないので、
+/// ふつうの訂正の行（`predicted` が別の話者）は残す。
+pub(super) fn forget_confirmed(
+    conn: &Connection,
+    recording_id: &str,
+    idx: u32,
+    current: Option<&str>,
+) -> Result<()> {
+    // `IS` で比べる。話者不明に戻した訂正が、やり直しでも未割当の発言に引き継がれると
+    // 両方 NULL の行になる。
+    conn.execute(
+        "DELETE FROM speaker_corrections
+         WHERE recording_id = ?1 AND idx = ?2 AND predicted IS ?3 AND corrected IS ?3",
+        params![recording_id, idx, current],
+    )?;
+    Ok(())
+}
+
 /// 話者分離のやり直しで書き直した訂正に差し替える。残る行は直した時刻を保ち、
 /// 引き継げなかった行は消す。
 pub(super) fn replace_after_rediarize(

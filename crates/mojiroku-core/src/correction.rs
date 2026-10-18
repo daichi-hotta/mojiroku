@@ -99,9 +99,11 @@ pub fn carry_corrections(
         let target = match c.corrected.as_deref() {
             None => Some(None),
             // やり直しで、選んだ話者と利用者が否定した話者が同じ人にまとまったら、
-            // 訂正の意味が失われる。引き継げないものとして扱う。
+            // 訂正の意味が失われる。引き継げないものとして扱う。前のやり直しが選択と
+            // 一致した行（predicted = corrected）には否定した話者が無いので当てはまらない。
             Some(_)
-                if new_id(c.predicted.as_deref()).is_some()
+                if c.predicted != c.corrected
+                    && new_id(c.predicted.as_deref()).is_some()
                     && new_id(c.predicted.as_deref()) == new_id(c.corrected.as_deref()) =>
             {
                 None
@@ -217,6 +219,31 @@ mod tests {
         assert_eq!(t.segments[2].speaker_id, None);
         assert!(out.corrections.is_empty());
         assert_eq!(out.unmapped, 1);
+    }
+
+    #[test]
+    fn line_confirmed_by_a_previous_re_run_is_carried_again() {
+        // 前のやり直しが利用者の選択と一致した行（predicted = corrected）。否定した話者が
+        // 無いので、まとまりの規則で未割当にしない。
+        let previous = prev(&[Some("S1"), Some("S2"), Some("S2")]);
+        let mut t = transcript(&[Some("S1"), Some("S2"), Some("S2")]);
+        let out = carry_corrections(&[fix(2, Some("S2"), Some("S2"))], &previous, &mut t, &[]);
+
+        assert_eq!(ids(&t), vec![Some("S1"), Some("S2"), Some("S2")]);
+        assert_eq!(out.corrections, vec![fix(2, Some("S2"), Some("S2"))]);
+        assert_eq!(out.unmapped, 0);
+    }
+
+    #[test]
+    fn line_confirmed_by_hand_keeps_the_choice_when_the_re_run_moves_it() {
+        // やり直しで旧 S1 は新 S2、旧 S2 は新 S1 になり、手で確かめた発言 2 は新 S2 に付いた。
+        let previous = prev(&[Some("S1"), Some("S2"), Some("S2")]);
+        let mut t = transcript(&[Some("S2"), Some("S1"), Some("S2")]);
+        let out = carry_corrections(&[fix(2, Some("S2"), Some("S2"))], &previous, &mut t, &[]);
+
+        assert_eq!(ids(&t), vec![Some("S2"), Some("S1"), Some("S1")]);
+        assert_eq!(out.corrections, vec![fix(2, Some("S2"), Some("S1"))]);
+        assert_eq!(out.unmapped, 0);
     }
 
     #[test]

@@ -130,7 +130,8 @@ SummaryTemplate      { id, name, prompt, kind(minutes|summary|action_items) }
 `idx` は `insert_segments` が `enumerate()` で採番した連番で、`Segment.idx` として API 境界に出る。
 
 **戻り値は「実際に変えたか」**（`Result<bool>` → コマンド → `invoke<boolean>`）。
-同じ話者を選び直したときは `false` を返して何もしない。UI はこれを見て「要約が古い」の表示を
+同じ話者を選び直したときは `false` を返し、発言も要約も変えない（下の「手で確かめた発言」の
+行だけは消す）。UI はこれを見て「要約が古い」の表示を
 出し分ける — 真偽を知っているのはコアだけなので、**UI 側で現在値と比較させない**
 （UI の値が DB と一致している前提に依存してしまう）。
 
@@ -178,7 +179,9 @@ SummaryTemplate      { id, name, prompt, kind(minutes|summary|action_items) }
 （`JobUpdate.unmapped_corrections`）で画面に出す。利用者が一度否定した話者分離の結果に
 黙って戻さないためである。残った行は新しい id で書き直し、`predicted` はやり直しの結果になる。
 やり直しの結果が利用者の選択と一致した行も消さない（手で確かめた発言として残す。
-取り消しで行を消すのは、利用者が自分で `predicted` を選び直したときだけ）。
+取り消しで行を消すのは、利用者が自分で `predicted` を選び直したときだけ）。手で確かめた発言では
+`predicted` が今の話者なので、今の話者を選び直すと行だけが消える（発言と要約は変えない）。
+否定した話者が無いので、次のやり直しで「否定した話者とまとまった」として未割当にもしない。
 
 `segments` を書き換える経路を新しく足すときは、`speaker_corrections` をどうするかを決めること。
 

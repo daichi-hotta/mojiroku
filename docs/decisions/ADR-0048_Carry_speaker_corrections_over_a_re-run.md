@@ -37,11 +37,14 @@ that line. Dropping it silently is not acceptable (§9.1).
    count. This includes a correction whose chosen speaker and originally predicted speaker
    map to the same new speaker: the re-run merged the two people the user told apart, so
    keeping the line on that speaker would silently undo the correction. The UI shows it as a notice after the re-run. The line is not left on the new
-   prediction, which the user had already rejected once.
+   prediction, which the user had already rejected once. A line confirmed by hand (rule 4)
+   has no rejected speaker, so this case does not apply to it.
 4. The stored rows are rewritten in the new ids. `predicted` becomes the re-run's
    assignment, so the table always compares the current separation with the user's choice.
    A row whose new prediction matches the user's choice is kept as a line confirmed by hand.
-   Only the user choosing the predicted speaker again deletes a row.
+   Only the user choosing the predicted speaker again deletes a row. For a confirmed row
+   that is the line's current speaker, so choosing it again deletes the row without changing
+   the line or marking summaries stale.
 
 ## Evidence
 

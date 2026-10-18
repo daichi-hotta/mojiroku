@@ -1014,6 +1014,65 @@ mod tests {
     }
 
     #[test]
+    fn reselecting_the_current_speaker_removes_a_line_confirmed_by_a_re_run() {
+        let s = SqliteStore::open_in_memory().unwrap();
+        s.save_recording(&rec("r1"), &transcript_with_speakers(), &speakers())
+            .unwrap();
+        // やり直しの結果が利用者の選択と一致した行（ADR-0048 の 4）。
+        let confirmed = [correction(0, Some("S1"), Some("S1"))];
+        s.replace_speaker_assignments(
+            "r1",
+            &transcript_with_speakers(),
+            &speakers(),
+            &[],
+            "titanet",
+            &[],
+            &confirmed,
+        )
+        .unwrap();
+        s.save_summary("r1", &summary("minutes", vec![])).unwrap();
+        assert_eq!(s.speaker_corrections("r1").unwrap(), confirmed.to_vec());
+
+        // predicted（= 今の話者）を選び直すと取り消しになる。発言と要約はそのまま。
+        assert!(!s.set_segment_speaker("r1", 0, Some("S1")).unwrap());
+        assert!(s.speaker_corrections("r1").unwrap().is_empty());
+        let d = s.get_recording_detail("r1").unwrap().unwrap();
+        assert_eq!(d.transcript.segments[0].speaker_id.as_deref(), Some("S1"));
+        assert!(!d.summaries[0].stale);
+    }
+
+    #[test]
+    fn reselecting_unknown_removes_a_cleared_line_confirmed_by_a_re_run() {
+        // 話者不明に戻した訂正が、やり直しでも未割当の発言に引き継がれた行（両方 NULL）。
+        let s = SqliteStore::open_in_memory().unwrap();
+        s.save_recording(&rec("r1"), &transcript_with_speakers(), &speakers())
+            .unwrap();
+        let mut t = transcript_with_speakers();
+        t.segments[0].speaker_id = None;
+        let confirmed = [correction(0, None, None)];
+        s.replace_speaker_assignments("r1", &t, &speakers(), &[], "titanet", &[], &confirmed)
+            .unwrap();
+        assert_eq!(s.speaker_corrections("r1").unwrap(), confirmed.to_vec());
+
+        assert!(!s.set_segment_speaker("r1", 0, None).unwrap());
+        assert!(s.speaker_corrections("r1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn reselecting_the_current_speaker_keeps_an_ordinary_correction() {
+        let s = SqliteStore::open_in_memory().unwrap();
+        s.save_recording(&rec("r1"), &transcript_with_speakers(), &speakers())
+            .unwrap();
+        s.set_segment_speaker("r1", 1, Some("S1")).unwrap();
+
+        assert!(!s.set_segment_speaker("r1", 1, Some("S1")).unwrap());
+        assert_eq!(
+            s.speaker_corrections("r1").unwrap(),
+            vec![correction(1, Some("S2"), Some("S1"))]
+        );
+    }
+
+    #[test]
     fn replace_transcript_clears_corrections() {
         let s = SqliteStore::open_in_memory().unwrap();
         s.save_recording(&rec("r1"), &transcript_with_speakers(), &speakers())
