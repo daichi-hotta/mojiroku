@@ -82,6 +82,9 @@ Phase 6 の3連携（[[ADR-0013_Notion書き出し]] / [[ADR-0014_Slack送信]] 
 - **実機で潰した loopback バグ 2 つ（基盤共通）**: ①**macOS は accept したソケットがリスナの nonblocking を継承**する
   （BSD 特有・Linux は継承せず）→ accept 後 `set_nonblocking(false)`。②`wait_for_redirect` の完了判定が `code` しか見ておらず
   Worker 方式の `webhook` / `notion` を拾えず白画面で無限待機 → 完了判定に `webhook` / `notion` を追加。
+- **`state` の照合は listener の中で行う**（2026-10-22）。`state` が一致しないリクエストには中立ページを返して
+  `REDIRECT_TIMEOUT` まで待ち続け、`error` も `state` が一致したときだけ受け付ける。Worker の `bounce` と
+  Google のエラー応答はどちらも `state` を返すため、利用者が拒否した場合は従来どおりすぐに終わる。
 - **3 連携とも実機 E2E 成功**（Slack=実投稿 / Google=予定リスト表示 / Notion=指定ページに議事録作成）。
 - **デプロイ機構の注意**: 本番 Worker は**ローカル `cd landing && npx wrangler deploy`** が更新する。Cloudflare の
   **Workers Builds（Git 連携 CI）は `develop` をビルド**するため、worker が develop に乗るまで（feat ブランチのマージ前）は
