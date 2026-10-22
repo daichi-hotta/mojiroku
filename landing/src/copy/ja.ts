@@ -225,7 +225,7 @@ const ja = {
       text: "この説明を、説明のまま信じる必要はありません。アプリ全体のソースを公開しているので、本当に端末の外へ出ていないかを自分で確かめられます。",
       label: "GitHub でソースを見る",
       note: "AGPL-3.0",
-      href: "https://github.com/daichi8120/mojiroku",
+      href: "https://github.com/daichi-hotta/mojiroku",
     },
   },
 
@@ -341,12 +341,12 @@ const ja = {
       {
         title: "GitHub Releases",
         body: "リリースと変更履歴",
-        href: "https://github.com/daichi8120/mojiroku-releases/releases",
+        href: "https://github.com/daichi-hotta/mojiroku-releases/releases",
       },
       {
         title: "ソースコード",
         body: "AGPL-3.0 で公開",
-        href: "https://github.com/daichi8120/mojiroku",
+        href: "https://github.com/daichi-hotta/mojiroku",
       },
     ],
     year: 2026,

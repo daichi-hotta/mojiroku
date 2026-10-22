@@ -9,8 +9,8 @@ does not test overlapping speakers, conversational backchannels, long recordings
 or Japanese/English switching within a meeting. Real-use feedback after release
 decides whether the app is better. No manual transcription or labelling is required.
 
-Related: [#76](https://github.com/daichi8120/mojiroku/issues/76),
-[#77](https://github.com/daichi8120/mojiroku/issues/77).
+Related: [#76](https://github.com/daichi-hotta/mojiroku/issues/76),
+[#77](https://github.com/daichi-hotta/mojiroku/issues/77).
 
 ## Data and attribution
 

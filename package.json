@@ -1,7 +1,7 @@
 {
   "name": "mojiroku",
   "private": true,
-  "version": "0.7.0",
+  "version": "0.7.1",
   "license": "AGPL-3.0-or-later",
   "description": "文字起こし → 要約・議事録作成をローカル完結・基本無料で行うデスクトップアプリ",
   "scripts": {
