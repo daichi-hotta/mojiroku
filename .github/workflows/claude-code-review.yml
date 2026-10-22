@@ -101,9 +101,18 @@ jobs:
 
             Steps
             1. Read `git diff --stat BASE...HEAD`, then the full diff.
-            2. For each changed function, read its callers, callees, related configuration and tests with Read and Grep. Check behavior outside the diff, not only the changed lines.
-            3. Read the repository's AGENTS.md or CLAUDE.md (root and the directories of changed files) and check the change against the rules that apply to those files.
-            4. Before keeping a finding, confirm in the actual code that it happens. Drop anything you cannot confirm.
+            2. Read every changed source file in full at the head version (skip lockfiles, generated files and binary assets). For a file over 800 lines, read each changed region with 150 lines around it. Then read the callers and callees of each changed function, and the related configuration, prompts and tests.
+            3. Read the repository's AGENTS.md or CLAUDE.md (root and the directories of changed files) and note the rules that apply to the changed files.
+            4. Write down candidate problems before judging any of them. For each changed behavior, ask:
+               - Contracts: do all producers and consumers agree on limits, formats, units, enum values and defaults? Compare prompt text with the validator, the frontend with the backend, and docs or ADRs with the code.
+               - Lifecycle: what happens if the work is cancelled, retried, run twice, or interrupted by a restart? Does cancellation reach every new code path?
+               - Concurrency: between a check and the write that depends on it, can a user edit or another job change the state?
+               - Empty and cleared values: is an explicit user choice (an empty or cleared field) told apart from "never set"?
+               - Parsing and normalization: does the order of steps matter? What about input in a slightly different form (a prefix, wrapping markup, whitespace, case, another language)?
+               - Errors: is each error surfaced, swallowed, or mapped to a misleading message?
+               - The AGENTS.md or CLAUDE.md rules noted in step 3.
+            5. Verify each candidate in the code. Keep it when you can name the input or sequence of events and the code path that produces the wrong result; you do not need to run it. Drop the rest.
+            6. If a change of more than 200 lines leaves you with no findings, go through step 4 once more for the files you read least closely before concluding.
 
             What to report
             - P0: data loss, a security hole, or the product cannot start or release.
@@ -111,7 +120,7 @@ jobs:
             - P2: wrong behavior under a specific but realistic condition (a race, cancellation, an edge input, a platform difference), or a clear violation of a quoted AGENTS.md or CLAUDE.md rule.
             - Report a conditional bug as P2 when the condition can realistically occur. Do not drop it because it depends on inputs or state.
             - Report every confirmed problem. Merge findings that share one root cause into one.
-            - Do not report: style or naming preferences, missing comments, anything a linter or compiler would catch, problems that existed before this PR unless the PR makes them worse, or speculation.
+            - Do not report: style or naming preferences, missing comments, anything a linter or compiler would catch, or problems that existed before this PR unless the PR makes them worse.
 
             Earlier findings
             - Do not repeat a finding listed in context.md.
@@ -124,6 +133,8 @@ jobs:
             - summary: two to four sentences on what you checked and where you looked hardest. Write it even when there are no findings.
             - Write titles, bodies and the summary in the language this repository's AGENTS.md or CLAUDE.md prescribes for PR reviews; use English if it says nothing.
             - Do not post to GitHub, edit files, build, or run tests. A later step posts your JSON result.
+          # Pin reasoning effort so a change in the CLI default does not change review depth.
+          settings: '{"effortLevel": "high"}'
           claude_args: |
             --model claude-opus-5-5
             --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(gh pr view:*),Bash(gh pr diff:*)"
