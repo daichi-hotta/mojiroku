@@ -8,7 +8,10 @@
 #     The earlier code-review plugin posted by itself and often posted nothing: it skipped
 #     PRs it had already commented on and dropped most findings by design.
 #   - Every tool Claude needs is listed in --allowedTools. One earlier run hit 40 permission
-#     denials and still reported "No issues found".
+#     denials and still reported "No issues found". The summary now counts blocked tool calls
+#     and warns when there are any; the run log lists each one.
+#   - Claude reports fixed findings by the ids in context.md. The last step marks those comments,
+#     and later runs leave them out, so a fix is announced once.
 #   - Changed files are split across parallel subagents that read them in full, and the main
 #     agent verifies their candidates. A single agent stopped after a few partial reads and
 #     missed most of the findings Codex had made on the same diffs.
@@ -67,6 +70,7 @@ jobs:
               core.setOutput('stale', 'true');
               return;
             }
+            const BOT = 'github-actions[bot]';
             // Our JSON block is the last marker in the summary; Claude's text cannot contain one (see clean).
             function readUnplaced(body) {
               const tag = '<!-- claude-review:unplaced ';
@@ -78,24 +82,31 @@ jobs:
                 return [];
               }
             }
+            // Claude reports fixed findings by these ids. The post step computes the same ones.
+            const unplacedId = (f) => 'u' + require('crypto').createHash('sha256')
+              .update(JSON.stringify([f.severity, f.path, f.line, f.title])).digest('hex').slice(0, 8);
             const reviewComments = await github.paginate(github.rest.pulls.listReviewComments, {
               owner, repo, pull_number: pr.number, per_page: 100,
             });
+            // A finding the post step marked as fixed is left out, so it is not reported as fixed again.
             const prior = reviewComments
-              .filter((c) => c.body.includes('<!-- claude-review:finding -->'))
+              .filter((c) => c.user && c.user.login === BOT && c.body.includes('<!-- claude-review:finding -->')
+                && !c.body.includes('<!-- claude-review:resolved'))
               .map((c) => {
                 const title = c.body.split('\n')[0].replace(/\*\*/g, '');
                 let where = `${c.path}:${c.line}`;
                 if (c.subject_type === 'file') where = `${c.path} (file comment)`;
                 else if (c.line == null) where = `${c.path} (outdated)`;
-                return `- ${where}: ${title}`;
+                return `- [c${c.id}] ${where}: ${title}`;
               });
             // Findings that could not be placed on the diff live in the summary comment.
             const issueComments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number: pr.number, per_page: 100,
             });
-            const summary = issueComments.find((c) => c.user.login === 'github-actions[bot]' && c.body.includes('<!-- claude-review:summary -->'));
-            for (const f of readUnplaced(summary && summary.body)) prior.push(`- ${f.path}:${f.line} (summary only): ${f.severity} · ${f.title}`);
+            const summary = issueComments.find((c) => c.user && c.user.login === BOT && c.body.includes('<!-- claude-review:summary -->'));
+            for (const f of readUnplaced(summary && summary.body)) {
+              prior.push(`- [${unplacedId(f)}] ${f.path}:${f.line} (summary only): ${f.severity} · ${f.title}`);
+            }
             const text = [
               `# PR #${pr.number}: ${pr.title}`,
               '',
@@ -164,7 +175,7 @@ jobs:
 
             Earlier findings
             - Do not repeat a finding listed in context.md, unless it is marked (outdated) and the problem is still in the new code.
-            - If the new code fixes one, copy the text after its location in context.md into resolved_prior, word for word.
+            - If the new code fixes one, put its id into resolved_prior: the bracketed text at the start of its line in context.md, such as c1234567890 or u1a2b3c4d.
 
             Output
             - path is relative to the repository root. line is the line number in the head version, confirmed with Read. Pick a line inside the diff (an added line or a nearby context line). Use start_line for a multi-line range.
@@ -185,15 +196,19 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           REVIEW_JSON: ${{ steps.claude.outputs.structured_output }}
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
         with:
           script: |
+            const fs = require('fs');
             const pr = context.payload.pull_request;
             const { owner, repo } = context.repo;
             const sha = pr.head.sha;
             const short = sha.slice(0, 7);
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const BOT = 'github-actions[bot]';
             const SUMMARY = '<!-- claude-review:summary -->';
             const FINDING = '<!-- claude-review:finding -->';
+            const RESOLVED = '<!-- claude-review:resolved';
             const ICON = { P0: '🔴', P1: '🟠', P2: '🟡' };
             const RANK = { P0: 0, P1: 1, P2: 2 };
             // Claude's text must not open an HTML comment: it would hide the rest or fake a marker.
@@ -209,6 +224,9 @@ jobs:
                 return [];
               }
             }
+            // The same ids as in the context step.
+            const unplacedId = (f) => 'u' + require('crypto').createHash('sha256')
+              .update(JSON.stringify([f.severity, f.path, f.line, f.title])).digest('hex').slice(0, 8);
 
             // A re-run is not cancelled by a newer push, so it may finish after the head moved on.
             const { data: live } = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
@@ -217,13 +235,33 @@ jobs:
               return;
             }
 
+            // The action saves every message of the run to this file, and the final result message lists
+            // the tool calls that --allowedTools blocked. A partly blocked review must not look clean.
+            let denials = null;
+            try {
+              const result = JSON.parse(fs.readFileSync(process.env.EXECUTION_FILE, 'utf8')).filter((m) => m && m.type === 'result').pop();
+              if (result && Array.isArray(result.permission_denials)) denials = result.permission_denials;
+            } catch (e) {
+              core.warning(`No execution file to count blocked tool calls (${e.message}).`);
+            }
+            const tally = new Map();
+            for (const d of denials || []) {
+              const name = clean((d && d.tool_name) || 'unknown');
+              tally.set(name, (tally.get(name) || 0) + 1);
+              core.warning(`Blocked tool call: ${name} ${JSON.stringify((d && d.tool_input) || {}).slice(0, 300)}`);
+            }
+            const blocked = denials && denials.length
+              ? [`⚠️ The permission settings blocked ${denials.length} tool call(s) (${[...tally].map(([k, v]) => `${k} ×${v}`).join(', ')}), so parts of this review may be missing. The run log lists each call.`, '']
+              : [];
+            const footer = `<sub>[Workflow run](${runUrl}) · blocked tool calls: ${denials ? denials.length : 'unknown'}</sub>`;
+
             const issueComments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number: pr.number, per_page: 100,
             });
-            const previous = issueComments.find((c) => c.user.login === 'github-actions[bot]' && c.body.includes(SUMMARY));
+            const previous = issueComments.find((c) => c.user && c.user.login === BOT && c.body.includes(SUMMARY));
 
             async function upsertSummary(text) {
-              const body = `${SUMMARY}\n## Claude review\n\n${text}\n\n<sub>[Workflow run](${runUrl})</sub>`;
+              const body = [SUMMARY, '## Claude review', '', ...blocked, text, '', footer].join('\n');
               if (previous) {
                 await github.rest.issues.updateComment({ owner, repo, comment_id: previous.id, body });
               } else {
@@ -257,6 +295,14 @@ jobs:
               return;
             }
 
+            // Read before posting, so a comment posted by this run can never be marked as fixed.
+            const reviewComments = await github.paginate(github.rest.pulls.listReviewComments, {
+              owner, repo, pull_number: pr.number, per_page: 100,
+            });
+            const open = new Map(reviewComments
+              .filter((c) => c.user && c.user.login === BOT && c.body.includes(FINDING) && !c.body.includes(RESOLVED))
+              .map((c) => [`c${c.id}`, c]));
+
             const findings = review.findings
               .map((f) => ({ ...f, title: clean(f.title), body: clean(f.body) }))
               .sort((a, b) => RANK[a.severity] - RANK[b.severity]);
@@ -285,7 +331,7 @@ jobs:
                 });
               } catch (e) {
                 // An error can arrive after GitHub stored the review; never post the findings twice.
-                const stored = (await listReviews()).some((r) => !before.has(r.id) && r.user.login === 'github-actions[bot]' && r.commit_id === sha);
+                const stored = (await listReviews()).some((r) => !before.has(r.id) && r.user && r.user.login === BOT && r.commit_id === sha);
                 core.warning(`Batch review failed (${e.message}); ${stored ? 'it was stored anyway' : 'placing findings one by one'}.`);
                 for (const f of stored ? [] : findings) {
                   try {
@@ -307,9 +353,36 @@ jobs:
               }
             }
 
-            // Summary-only findings from earlier runs stay listed until Claude reports them fixed.
-            const resolved = new Set((review.resolved_prior || []).map(clean));
-            const carried = earlier.filter((f) => ![...resolved].some((r) => r.includes(f.title)));
+            // Claude names fixed findings by their ids in context.md. A fixed inline finding gets a note and
+            // the resolved marker, so the next context step leaves it out. A fixed summary-only finding is
+            // no longer carried. Earlier findings stay listed until Claude reports them fixed.
+            const ids = new Set();
+            for (const r of review.resolved_prior || []) {
+              const m = String(r).match(/\b[cu][0-9a-f]{8,}\b/);
+              if (m) ids.add(m[0]);
+              else core.warning(`resolved_prior entry without an id: ${String(r).slice(0, 200)}`);
+            }
+            const fixed = [];
+            for (const id of ids) {
+              const c = open.get(id);
+              const f = earlier.find((e) => unplacedId(e) === id);
+              if (c) {
+                fixed.push(`- \`${c.path}${c.line ? `:${c.line}` : ''}\`: ${c.body.split('\n')[0].replace(/\*\*/g, '')}`);
+                try {
+                  await github.rest.pulls.updateReviewComment({
+                    owner, repo, comment_id: c.id,
+                    body: `${c.body}\n\n✅ Fixed in \`${short}\`, according to the Claude review.\n${RESOLVED} ${sha} -->`,
+                  });
+                } catch (e) {
+                  core.warning(`Could not mark comment ${c.id} as fixed: ${e.message}`);
+                }
+              } else if (f) {
+                fixed.push(`- \`${f.path}:${f.line}\` (summary only): ${f.severity} · ${f.title}`);
+              } else {
+                core.warning(`resolved_prior names no open finding: ${id}`);
+              }
+            }
+            const carried = earlier.filter((f) => !ids.has(unplacedId(f)));
             const summaryOnly = [...unplaced, ...carried];
 
             const n = (s) => findings.filter((f) => f.severity === s).length;
@@ -317,8 +390,6 @@ jobs:
               ? `Commit \`${short}\`: ${findings.length} new finding(s) (P0 ${n('P0')} · P1 ${n('P1')} · P2 ${n('P2')}).`
               : `Commit \`${short}\`: no new findings.`];
             lines.push('', clean(review.summary));
-            if (resolved.size) {
-              lines.push('', '**Fixed since the last review**', ...[...resolved].map((t) => `- ${t}`));
-            }
+            if (fixed.length) lines.push('', '**Fixed since the last review**', ...fixed);
             lines.push(...summaryOnlySection(summaryOnly));
             await upsertSummary(lines.join('\n'));
