@@ -212,6 +212,11 @@ PR の自動レビュー（Codex のコードレビュー）が読む規則。**
   飛ばした job は success 扱いになる。
   なお push トリガーのデプロイ用ワークフロー（`deploy-landing.yml` など）はこの制約の
   対象外で、ワークフローレベルのフィルタを使ってよい。
+- `release.yml` / `deploy-landing.yml` の secrets（updater 署名鍵・Apple の資格情報・公開用 PAT・
+  Cloudflare トークン）は **job の `env:` に置かず、使う step の `env:` にだけ渡す**。
+  あわせて action は**コミット SHA で固定**する（タグやブランチは書き換えられる）。job env だと
+  第三者 action や npm / cargo のビルドスクリプトからも読め、どれか 1 つが侵害されると
+  正規署名つき・公証済みの悪性アップデートを全利用者に配れる。
 
 ## 検証の心構え
 
