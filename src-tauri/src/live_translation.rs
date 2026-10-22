@@ -223,13 +223,15 @@ pub(crate) fn cancel_live_translation_request(
         .cancel_request(epoch, request_id);
 }
 
+/// A sidecar prompt in a fresh temp file (`create_new`, 0600), removed on drop.
+/// Shared with the local summary path (`commands::transcription::run_local_llm`).
 pub(crate) struct PromptFile(pub(crate) PathBuf);
 
 impl PromptFile {
-    fn create(text: &str) -> Result<Self, String> {
+    pub(crate) fn create(text: &str) -> Result<Self, String> {
         use std::io::Write;
         let path =
-            std::env::temp_dir().join(format!("mojiroku-translation-{}.txt", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("mojiroku-prompt-{}.txt", uuid::Uuid::new_v4()));
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -251,9 +253,10 @@ impl Drop for PromptFile {
     }
 }
 
-struct ChildGuard(Option<CommandChild>);
+/// Kills the child on drop unless it has already terminated (set the inner value to `None` then).
+pub(crate) struct ChildGuard(pub(crate) Option<CommandChild>);
 impl ChildGuard {
-    fn kill(&mut self) {
+    pub(crate) fn kill(&mut self) {
         if let Some(child) = self.0.take() {
             let _ = child.kill();
         }

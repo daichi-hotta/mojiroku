@@ -348,8 +348,78 @@ pub(crate) async fn generate_title(
     Ok(title)
 }
 
+/// ローカル LLM sidecar 1 回の上限時間（要約・タイトル生成で共通）。測った値ではなく、固まった
+/// sidecar が重い処理の許可（HEAVY_ML_JOB）を持ち続けないための上限。プロンプトは最大
+/// N_CTX = 32,768 トークン・出力は既定 2,048 トークンで、メモリに余裕の無い Mac でも長い会議の要約が
+/// 打ち切られないよう、ライブ翻訳（1 行 30 秒）よりずっと長く取る。
+const LOCAL_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// 上限時間で打ち切ったときの詳細キー（`error.summarize.sidecar_failed: <これ>` の形で返す）。
+const LOCAL_LLM_TIMEOUT_DETAIL: &str = "error.summarize.timeout";
+
+/// sidecar の終了コードと出力（`Command::output` と同じ形）。
+struct SidecarOutput {
+    code: Option<i32>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// `Command::output` と同じように出力を集めるが、`timeout` を過ぎたら sidecar を止める。
+/// 止めたあともプロセスの終了（`Terminated`）を待ってから返すので、呼び出し側が持つ重い処理の
+/// 許可が、まだ動いているプロセスを残したまま返ることはない。
+async fn run_sidecar_bounded(
+    command: tauri_plugin_shell::process::Command,
+    timeout: std::time::Duration,
+) -> Result<SidecarOutput, String> {
+    use tauri_plugin_shell::process::CommandEvent;
+
+    let (mut events, child) = command.spawn().map_err(|e| e.to_string())?;
+    let mut child = crate::live_translation::ChildGuard(Some(child));
+    let mut output = SidecarOutput {
+        code: None,
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+    };
+    let mut timed_out = false;
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline, if !timed_out => {
+                timed_out = true;
+                child.kill();
+            }
+            event = events.recv() => match event {
+                // 行単位のイベントに改行を戻す（`Command::output` と同じ）。
+                Some(CommandEvent::Stdout(line)) => {
+                    output.stdout.extend(line);
+                    output.stdout.push(b'\n');
+                }
+                Some(CommandEvent::Stderr(line)) => {
+                    output.stderr.extend(line);
+                    output.stderr.push(b'\n');
+                }
+                Some(CommandEvent::Terminated(status)) => {
+                    child.0 = None;
+                    output.code = status.code;
+                }
+                Some(_) => {}
+                // 出力の読み取りと終了の通知がすべて済むとチャネルが閉じる。
+                None => break,
+            },
+        }
+    }
+    if timed_out {
+        return Err(format!(
+            "error.summarize.sidecar_failed: {LOCAL_LLM_TIMEOUT_DETAIL}"
+        ));
+    }
+    Ok(output)
+}
+
 /// ローカル要約 sidecar（`mojiroku-llm`, ADR-0007）を 1 回実行して標準出力を返す。要約とタイトル生成で共通。
 /// 呼び出し側が重い処理の許可（HEAVY_ML_JOB）を持っていること。`max_tokens` を省くと sidecar の既定。
+/// [`LOCAL_LLM_TIMEOUT`] を過ぎたら sidecar を止めてエラーを返す。
 pub(crate) async fn run_local_llm(
     app: &AppHandle,
     model_path: &std::path::Path,
@@ -359,14 +429,14 @@ pub(crate) async fn run_local_llm(
 ) -> Result<String, String> {
     use tauri_plugin_shell::ShellExt;
 
-    // プロンプトは temp ファイルで渡す（巨大な文字起こしを引数で渡さない）。呼び出しごとに別名。
-    let prompt_file =
-        std::env::temp_dir().join(format!("mojiroku-prompt-{}.txt", uuid::Uuid::new_v4()));
-    std::fs::write(&prompt_file, prompt).map_err(|e| e.to_string())?;
+    // プロンプトは temp ファイルで渡す（巨大な文字起こしを引数で渡さない）。呼び出しごとに別名で
+    // 新規作成し（0600）、この関数を抜けると消える。
+    let prompt_file = crate::live_translation::PromptFile::create(prompt)
+        .map_err(|_| "error.summarize.sidecar_failed: prompt file".to_string())?;
 
     let mut args = vec![
         model_path.to_string_lossy().to_string(),
-        prompt_file.to_string_lossy().to_string(),
+        prompt_file.0.to_string_lossy().to_string(),
     ];
     if let Some(n) = max_tokens {
         args.push(n.to_string());
@@ -386,17 +456,14 @@ pub(crate) async fn run_local_llm(
         args.push("--no-think".to_string());
     }
 
-    let result = app
+    let command = app
         .shell()
         .sidecar("mojiroku-llm")
         .map_err(|e| e.to_string())?
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| e.to_string());
-    let _ = std::fs::remove_file(&prompt_file);
-    let output = result?;
-    if !output.status.success() {
+        .args(args);
+    let output = run_sidecar_bounded(command, LOCAL_LLM_TIMEOUT).await?;
+    drop(prompt_file);
+    if output.code != Some(0) {
         return Err(format!(
             "error.summarize.sidecar_failed: {}",
             String::from_utf8_lossy(&output.stderr)
@@ -445,4 +512,47 @@ async fn summarize_cloud(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    use tauri_plugin_shell::ShellExt;
+
+    fn test_app() -> tauri::App<tauri::test::MockRuntime> {
+        tauri::test::mock_builder()
+            .plugin(tauri_plugin_shell::init())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap()
+    }
+
+    /// run_sidecar_bounded: 出力と終了コードは `Command::output` と同じ形で返し、上限時間を過ぎたら止める。
+    #[tokio::test]
+    async fn sidecar_output_is_collected_and_timeout_is_bounded() {
+        let app = test_app();
+        let output = run_sidecar_bounded(
+            app.shell()
+                .command("/bin/sh")
+                .args(["-c", "printf 'a\\nb'; printf err >&2; exit 3"]),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.code, Some(3));
+        assert_eq!(output.stdout, b"a\nb\n");
+        assert_eq!(output.stderr, b"err\n");
+
+        let started = Instant::now();
+        let result = run_sidecar_bounded(
+            app.shell().command("/bin/sh").args(["-c", "exec sleep 30"]),
+            Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(
+            result.err().as_deref(),
+            Some("error.summarize.sidecar_failed: error.summarize.timeout")
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
 }
