@@ -44,6 +44,11 @@ pub(crate) fn delete_recording(
     store: State<'_, SqliteStore>,
     id: String,
 ) -> Result<(), String> {
+    // 原本の削除は id の前方一致（belongs_to_recording）なので、UUID 以外の id では他の録音の
+    // ファイルまで一致しうる。DB にもファイルにも触れる前に拒否する。
+    if !is_recording_id(&id) {
+        return Err("error.recording.not_found".to_string());
+    }
     store.delete_recording(&id).map_err(|e| e.to_string())?;
     // 録音原本（recordings/<id>.*）を best-effort で削除（孤立防止）。
     // file 取込=<id>.<元拡張子> / mic・結合ミックス=<id>.wav に加え、会議のデュアルトラック原本
@@ -72,6 +77,12 @@ fn belongs_to_recording(name: &str, id: &str) -> bool {
     name.starts_with(&format!("{id}.")) || name.starts_with(&format!("{id}-"))
 }
 
+/// 録音 id が `Uuid::new_v4().to_string()` の形（小文字・ハイフン区切りの 36 文字）か。
+/// `Uuid::parse_str` は波括弧つき・ハイフン無し・`urn:uuid:` も受け付けるので、正規形と一致まで確かめる。
+fn is_recording_id(id: &str) -> bool {
+    uuid::Uuid::parse_str(id).is_ok_and(|u| u.hyphenated().to_string() == id)
+}
+
 /// 録音タイトルを変更する。`title` が null/空白なら既定の「無題」表示へ戻す（NULL）。
 /// 全文検索（rec_fts）も同期されるので履歴検索と整合する。
 #[tauri::command]
@@ -87,7 +98,24 @@ pub(crate) fn rename_recording(
 
 #[cfg(test)]
 mod tests {
-    use super::belongs_to_recording;
+    use super::{belongs_to_recording, is_recording_id};
+
+    #[test]
+    fn is_recording_id_accepts_only_canonical_uuids() {
+        assert!(is_recording_id("11111111-1111-4111-8111-111111111111"));
+        assert!(is_recording_id(&uuid::Uuid::new_v4().to_string()));
+        // 前方一致で他の録音に当たりうる短い id・空文字・パス区切りは拒否する。
+        assert!(!is_recording_id(""));
+        assert!(!is_recording_id("11111111"));
+        assert!(!is_recording_id("../11111111-1111-4111-8111-111111111111"));
+        // parse_str が受け付ける別表記も拒否する（原本のファイル名は正規形だけ）。
+        assert!(!is_recording_id("11111111111141118111111111111111"));
+        assert!(!is_recording_id("{11111111-1111-4111-8111-111111111111}"));
+        assert!(!is_recording_id(
+            "urn:uuid:11111111-1111-4111-8111-111111111111"
+        ));
+        assert!(!is_recording_id("AAAAAAAA-1111-4111-8111-111111111111"));
+    }
 
     #[test]
     fn belongs_to_recording_matches_all_track_wavs_without_collision() {

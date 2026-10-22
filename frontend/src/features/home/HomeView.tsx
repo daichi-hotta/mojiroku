@@ -36,6 +36,7 @@ export function upcomingEvents(evs: CalendarEvent[], now: number): CalendarEvent
   });
 }
 
+// 足すときは Rust 側の取り込み許可リスト（src-tauri/src/commands/mod.rs の IMPORT_EXTENSIONS）にも足す。
 const AUDIO_EXT = ["mp3", "wav", "m4a", "aac", "aiff", "flac", "ogg"];
 const isAudio = (p: string) => AUDIO_EXT.some((x) => p.toLowerCase().endsWith(`.${x}`));
 

@@ -699,12 +699,15 @@ const ja = {
     "error.recording.meeting_silent":
       "会議の音声がほぼ無音でした（許可の失効や相手/自分のミュートを確認してください）",
     "error.recording.not_found": "録音が見つかりません",
+    "error.recording.unsupported_file": "対応していないファイル形式です",
+    "error.recording.not_a_file": "通常のファイルではないため取り込めません（フォルダなどは選べません）",
     "error.system_audio.busy": "すでにシステム音声をキャプチャ中です",
     "error.system_audio.permission":
       "システム音声の権限を取得できませんでした（システム設定 > プライバシーとセキュリティ > 画面とシステムオーディオの収録 で mojiroku を許可してください）",
     "error.system_audio.no_display": "ディスプレイが見つかりません",
     "error.summarize.api_key_missing": "クラウド要約には API キーが必要です（設定 → 要約エンジン）",
     "error.summarize.sidecar_failed": "ローカル要約の実行に失敗しました",
+    "error.summarize.timeout": "時間がかかりすぎたため中断しました",
     "error.title.sidecar_failed": "ローカルでのタイトル生成に失敗しました",
     "error.title.changed": "生成中にタイトルが変更されたため、生成したタイトルは使いませんでした",
     "error.title.not_generated": "タイトルを作れませんでした。もう一度試すか、手で入力してください",

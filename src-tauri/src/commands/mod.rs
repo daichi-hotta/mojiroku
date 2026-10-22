@@ -305,11 +305,37 @@ pub(crate) fn job_progress_callback(
     }
 }
 
+/// 取り込みを受け付ける拡張子（大文字小文字は区別しない）。ファイル選択とドロップの絞り込み
+/// （`frontend/src/features/home/HomeView.tsx` の `AUDIO_EXT`）を必ず含めること。
+/// 含め忘れると、画面で選べるファイルがここで拒否される。mp4 / mov はデコーダの isomp4 が読む動画コンテナ。
+const IMPORT_EXTENSIONS: &[&str] = &[
+    "mp3", "wav", "m4a", "aac", "aiff", "flac", "ogg", "mp4", "mov",
+];
+
+/// 取り込む前に、対応する拡張子の通常ファイルかを確かめる。`metadata` はシンボリックリンクを
+/// たどるので、音声ファイルへのリンクは通る。フォルダ・FIFO・デバイスは拒否する（FIFO は
+/// `std::fs::copy` を書き手が現れるまで止めてしまう）。
+fn check_import_source(path: &std::path::Path) -> Result<(), String> {
+    let supported = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| IMPORT_EXTENSIONS.iter().any(|x| x.eq_ignore_ascii_case(e)));
+    if !supported {
+        return Err("error.recording.unsupported_file".into());
+    }
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(()),
+        Ok(_) => Err("error.recording.not_a_file".into()),
+        Err(e) => Err(format!("error.recording.copy_failed: {e}")),
+    }
+}
+
 /// 取り込んだ音声ファイルの原本を `recordings/<id>.<元拡張子>` へ複製する。
 /// **フリップ後（ADR-0024）はワーカーがこのコピーを STT の入力に読む正本**なので、成功は必須
 /// （旧 best-effort から致命へ格上げ。失敗したら呼び出し側は録音行もジョブも作らない）。
 /// 音声確定を返答前に済ませる ADR-0023 の不変条件（rename ゲート）を File 経路にも揃える。
 /// 大きいファイルのコピーで async executor を塞がないよう `spawn_blocking` で行う。
+/// 複製の直前に [`check_import_source`] で通常ファイルと拡張子を確かめる。
 pub(crate) async fn copy_recording_original(
     app: &AppHandle,
     id: &str,
@@ -324,11 +350,13 @@ pub(crate) async fn copy_recording_original(
     let src = src_path.to_string();
     let dest = rec_dir.join(format!("{id}.{ext}"));
     tauri::async_runtime::spawn_blocking(move || {
-        std::fs::create_dir_all(&rec_dir).and_then(|_| std::fs::copy(&src, &dest).map(|_| ()))
+        check_import_source(std::path::Path::new(&src))?;
+        std::fs::create_dir_all(&rec_dir)
+            .and_then(|_| std::fs::copy(&src, &dest).map(|_| ()))
+            .map_err(|e| format!("error.recording.copy_failed: {e}"))
     })
     .await
     .map_err(|e| e.to_string())?
-    .map_err(|e| format!("error.recording.copy_failed: {e}"))
 }
 
 /// PCM(f32 interleaved, [-1,1]) を 16bit int WAV に書き出すワンショットヘルパ。
@@ -404,5 +432,55 @@ mod tests {
         assert_eq!(core_err(db), "error.segment.not_found");
         let db_plain = mojiroku_core::CoreError::Db("boom".into());
         assert_eq!(core_err(db_plain), "db error: boom");
+    }
+
+    /// check_import_source: 対応拡張子の通常ファイルだけを通す（大文字の拡張子・リンク越しも可）。
+    #[test]
+    fn check_import_source_accepts_only_supported_regular_files() {
+        let dir =
+            std::env::temp_dir().join(format!("mojiroku-import-check-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio = dir.join("meeting.M4A");
+        std::fs::write(&audio, b"x").unwrap();
+        assert_eq!(check_import_source(&audio), Ok(()));
+
+        let link = dir.join("link.mp3");
+        std::os::unix::fs::symlink(&audio, &link).unwrap();
+        assert_eq!(check_import_source(&link), Ok(()));
+
+        let text = dir.join("notes.txt");
+        std::fs::write(&text, b"x").unwrap();
+        assert_eq!(
+            check_import_source(&text),
+            Err("error.recording.unsupported_file".to_string())
+        );
+        assert_eq!(
+            check_import_source(&dir.join("no_extension")),
+            Err("error.recording.unsupported_file".to_string())
+        );
+
+        let folder = dir.join("folder.wav");
+        std::fs::create_dir(&folder).unwrap();
+        assert_eq!(
+            check_import_source(&folder),
+            Err("error.recording.not_a_file".to_string())
+        );
+
+        let fifo = dir.join("pipe.wav");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert_eq!(
+            check_import_source(&fifo),
+            Err("error.recording.not_a_file".to_string())
+        );
+
+        assert!(check_import_source(&dir.join("missing.wav"))
+            .unwrap_err()
+            .starts_with("error.recording.copy_failed: "));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

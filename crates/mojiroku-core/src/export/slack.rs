@@ -44,7 +44,7 @@ impl SlackExporter {
         }
         let title = meeting_title(detail.recording.title.as_deref(), self.lang);
         let blocks = build_blocks(detail, title, self.lang);
-        let fallback = format!("📝 {title}"); // blocks 表示不可な通知のフォールバック
+        let fallback = fallback_text(title);
 
         let agent = ureq::AgentBuilder::new()
             .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
@@ -112,6 +112,13 @@ fn slack_err(e: ureq::Error) -> CoreError {
     }
 }
 
+/// blocks を表示できない通知に出すトップレベルの `text`。Slack はこの欄も mrkdwn として解釈するので、
+/// section と同じく `&`/`<`/`>` をエスケープする（タイトルの `<!channel>` 等をメンションにしない）。
+/// 太字変換（`inline_mrkdwn`）は通さない（`__init__` のようなタイトルを書き換えないため）。
+fn fallback_text(title: &str) -> String {
+    format!("📝 {}", escape_mrkdwn(title))
+}
+
 /// 要約だけを Slack ブロックへ組む（header + 各要約の *ラベル* + 本文 section）。
 fn build_blocks(detail: &RecordingDetail, title: &str, lang: Lang) -> Vec<Value> {
     let mut blocks: Vec<Value> = vec![header_block(title)];
@@ -163,11 +170,14 @@ fn md_to_mrkdwn(md: &str) -> String {
 /// Markdown の太字 `**`/`__` を Slack の太字 `*` へ変換する。
 /// ⚠️ header（plain_text）はこの経路を通らない（plain_text はエンティティ不要）。
 fn inline_mrkdwn(s: &str) -> String {
-    let escaped = s
-        .replace('&', "&amp;")
+    escape_mrkdwn(s).replace("**", "*").replace("__", "*")
+}
+
+/// Slack mrkdwn の制御文字 `&`/`<`/`>` をエンティティへエスケープする（`&` が先）。
+fn escape_mrkdwn(s: &str) -> String {
+    s.replace('&', "&amp;")
         .replace('<', "&lt;")
-        .replace('>', "&gt;");
-    escaped.replace("**", "*").replace("__", "*")
+        .replace('>', "&gt;")
 }
 
 /// `# 見出し` の本文を返す（レベルは Slack では不要なので捨てる）。`#tag` は見出し扱いしない。
@@ -270,6 +280,17 @@ mod tests {
         assert_eq!(md_to_mrkdwn("a < b & c"), "a &lt; b &amp; c");
         // 太字変換とエスケープが両立する。
         assert_eq!(md_to_mrkdwn("**A** <x>"), "*A* &lt;x&gt;");
+    }
+
+    #[test]
+    fn fallback_text_escapes_title_without_bold_conversion() {
+        // トップレベルの text も mrkdwn なので、タイトルの `<!channel>` をメンションにしない。
+        assert_eq!(
+            fallback_text("定例 <!channel> & 共有"),
+            "📝 定例 &lt;!channel&gt; &amp; 共有"
+        );
+        // 太字変換はしない（`__init__` を `*init*` にしない）。
+        assert_eq!(fallback_text("__init__ の件"), "📝 __init__ の件");
     }
 
     #[test]

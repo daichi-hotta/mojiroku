@@ -106,16 +106,50 @@ fn open_browser(app: &AppHandle, url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// loopback で 1 回のリダイレクトを待ち、クエリパラメータを返す。`code` か `error` を含む
-/// リクエストが来るまでループ（favicon 等の無関係リクエストは握りつぶして継続）。
-/// ブラウザには「完了しました」ページを返してソケットを閉じる。
-fn wait_for_redirect(listener: &TcpListener) -> Result<HashMap<String, String>, String> {
+/// loopback に届いた 1 リクエストをどう扱うか。
+#[derive(Debug, PartialEq)]
+enum RedirectOutcome {
+    /// このフローのリダイレクトではない（favicon 等・`state` の欠落や不一致）。中立ページを返して待ち続ける。
+    Ignore,
+    /// このフローのリダイレクト。完了ページを返し、クエリパラメータを呼び出し側へ渡す。
+    Done,
+}
+
+/// 完了とみなすのは `state` が一致し、かつ code（PKCE 直接フロー）/ webhook（Slack の Worker
+/// ブローカー）/ notion（Notion の Worker ブローカー）/ error のいずれかを含むリクエストだけ。
+/// `state` が一致しない `error` で待機を終わらせない（Worker の bounce と Google のエラー応答は
+/// どちらも `state` を返すので、利用者の拒否はこの条件で拾える）。
+fn redirect_outcome(params: &HashMap<String, String>, expected_state: &str) -> RedirectOutcome {
+    if params.get("state").map(String::as_str) != Some(expected_state) {
+        return RedirectOutcome::Ignore;
+    }
+    if ["code", "webhook", "notion", "error"]
+        .iter()
+        .any(|key| params.contains_key(*key))
+    {
+        RedirectOutcome::Done
+    } else {
+        RedirectOutcome::Ignore
+    }
+}
+
+/// loopback で 1 回のリダイレクトを待ち、クエリパラメータを返す。`state` が一致する完了リクエスト
+/// （[`redirect_outcome`]）が来るまで、期限（[`REDIRECT_TIMEOUT`]）までループする。
+/// それ以外のリクエストには中立ページを返して継続する。完了時はブラウザに「完了しました」ページを返す。
+fn wait_for_redirect(
+    listener: &TcpListener,
+    expected_state: &str,
+) -> Result<HashMap<String, String>, String> {
     listener
         .set_nonblocking(true)
         .map_err(|e| format!("loopback nonblocking: {e}"))?;
     let deadline = Instant::now() + REDIRECT_TIMEOUT;
 
     loop {
+        // 期限は接続の有無に関係なく毎周確かめる（無関係な接続が続いても期限で終わる）。
+        if Instant::now() >= deadline {
+            return Err("error.oauth.timeout".into());
+        }
         match listener.accept() {
             Ok((mut stream, _)) => {
                 // ⚠️ macOS では accept したストリームがリスナの nonblocking を継承する（BSD 特有。
@@ -135,18 +169,13 @@ fn wait_for_redirect(listener: &TcpListener) -> Result<HashMap<String, String>, 
                     .unwrap_or("");
                 let params = parse_query(target);
 
-                // 完了判定: code（PKCE 直接フロー）/ webhook（Slack の Worker ブローカー）/
-                // notion（Notion の Worker ブローカー）/ error のいずれか。
-                let done = params.contains_key("code")
-                    || params.contains_key("webhook")
-                    || params.contains_key("notion")
-                    || params.contains_key("error");
+                let done = redirect_outcome(&params, expected_state) == RedirectOutcome::Done;
                 let body = if done {
                     "<!doctype html><html lang=\"ja\"><meta charset=\"utf-8\">\
                      <title>mojiroku</title><body style=\"font-family:system-ui;text-align:center;padding:48px;color:#111\">\
                      <h2>連携が完了しました</h2><p>このタブを閉じて mojiroku に戻ってください。</p></body></html>"
                 } else {
-                    // favicon 等。握りつぶして次の接続を待つ。
+                    // favicon 等・state が一致しないリクエスト。握りつぶして次の接続を待つ。
                     "<!doctype html><title>mojiroku</title>"
                 };
                 let resp = format!(
@@ -163,9 +192,6 @@ fn wait_for_redirect(listener: &TcpListener) -> Result<HashMap<String, String>, 
                 // 無関係リクエストなら継続
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                if Instant::now() >= deadline {
-                    return Err("error.oauth.timeout".into());
-                }
                 std::thread::sleep(Duration::from_millis(120));
             }
             Err(e) => return Err(format!("loopback accept: {e}")),
@@ -232,12 +258,16 @@ pub fn authorize_and_exchange(
     // OS の既定ブラウザで同意ページを開く。
     open_browser(app, auth_url.as_str())?;
 
-    // loopback で code を待つ。
-    let params = wait_for_redirect(&listener)?;
+    // loopback で code を待つ（state が一致するリダイレクトだけが返る）。
+    let params = wait_for_redirect(&listener, &state)?;
     eprintln!(
         "[oauth] リダイレクト受領: keys={:?}",
         params.keys().collect::<Vec<_>>()
     );
+    if params.get("state").map(String::as_str) != Some(state.as_str()) {
+        // state 不一致（CSRF 防止）。wait_for_redirect が弾くので通常は来ない。
+        return Err("error.oauth.state_mismatch".into());
+    }
     if let Some(err) = params.get("error") {
         let desc = params
             .get("error_description")
@@ -246,10 +276,6 @@ pub fn authorize_and_exchange(
         return Err(format!("error.oauth.denied: {err} {desc}")
             .trim_end()
             .to_string());
-    }
-    if params.get("state").map(String::as_str) != Some(state.as_str()) {
-        // state 不一致（CSRF 防止）。
-        return Err("error.oauth.state_mismatch".into());
     }
     let code = params
         .get("code")
@@ -339,19 +365,19 @@ fn connect_via_broker(app: &AppHandle, cfg: &BrokerConfig) -> Result<(), String>
         .append_pair("state", &state);
     open_browser(app, start.as_str())?;
 
-    // Worker が値（または error）を loopback へ 302 で返す。
-    let params = wait_for_redirect(&listener)?;
+    // Worker が値（または error）を loopback へ 302 で返す（state が一致するリダイレクトだけが返る）。
+    let params = wait_for_redirect(&listener, &state)?;
     eprintln!(
         "[oauth/{}] リダイレクト受領: keys={:?}",
         cfg.slug,
         params.keys().collect::<Vec<_>>()
     );
+    if params.get("state").map(String::as_str) != Some(state.as_str()) {
+        // state 不一致（CSRF 防止）。wait_for_redirect が弾くので通常は来ない。
+        return Err("error.oauth.state_mismatch".into());
+    }
     if let Some(err) = params.get("error") {
         return Err(format!("error.oauth.denied: {}: {err}", cfg.display));
-    }
-    if params.get("state").map(String::as_str) != Some(state.as_str()) {
-        // state 不一致（CSRF 防止）。
-        return Err("error.oauth.state_mismatch".into());
     }
     let value = params
         .get(cfg.result_key)
@@ -571,5 +597,39 @@ mod tests {
     #[test]
     fn parse_query_empty_when_no_query() {
         assert!(parse_query("/").is_empty());
+    }
+
+    fn outcome(target: &str) -> RedirectOutcome {
+        redirect_outcome(&parse_query(target), "expected")
+    }
+
+    #[test]
+    fn redirect_without_matching_state_keeps_waiting() {
+        // error / code / webhook があっても state が無い・違うなら待機を続ける。
+        assert_eq!(outcome("/?error=access_denied"), RedirectOutcome::Ignore);
+        assert_eq!(
+            outcome("/?error=access_denied&state=other"),
+            RedirectOutcome::Ignore
+        );
+        assert_eq!(outcome("/?code=abc&state=other"), RedirectOutcome::Ignore);
+        assert_eq!(outcome("/?webhook=x&state="), RedirectOutcome::Ignore);
+        assert_eq!(outcome("/favicon.ico"), RedirectOutcome::Ignore);
+    }
+
+    #[test]
+    fn redirect_with_matching_state_completes() {
+        assert_eq!(outcome("/?code=abc&state=expected"), RedirectOutcome::Done);
+        assert_eq!(outcome("/?webhook=x&state=expected"), RedirectOutcome::Done);
+        assert_eq!(outcome("/?notion=t&state=expected"), RedirectOutcome::Done);
+        // 利用者の拒否も state が一致すれば完了として返す（呼び出し側が denied にする）。
+        assert_eq!(
+            outcome("/?error=access_denied&state=expected"),
+            RedirectOutcome::Done
+        );
+    }
+
+    #[test]
+    fn matching_state_without_result_keeps_waiting() {
+        assert_eq!(outcome("/?state=expected"), RedirectOutcome::Ignore);
     }
 }
