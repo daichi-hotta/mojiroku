@@ -31,8 +31,10 @@ on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
 
+# A new push cancels the review of the previous one. A manual re-run gets its own group, so an
+# outdated re-run cannot cancel the current review; it then skips itself (see the context step).
 concurrency:
-  group: claude-review-${{ github.event.pull_request.number }}
+  group: claude-review-${{ github.event.pull_request.number }}${{ github.run_attempt != '1' && format('-rerun-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -208,6 +210,13 @@ jobs:
               }
             }
 
+            // A re-run is not cancelled by a newer push, so it may finish after the head moved on.
+            const { data: live } = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
+            if (live.head.sha !== sha) {
+              core.notice(`Not posted: ${short} is no longer the PR head (${live.head.sha.slice(0, 7)}).`);
+              return;
+            }
+
             const issueComments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number: pr.number, per_page: 100,
             });
@@ -266,6 +275,8 @@ jobs:
                 .filter(([, n]) => n)
                 .map(([s, n]) => `${ICON[s]} ${s} ×${n}`)
                 .join(' · ');
+              const listReviews = () => github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: pr.number, per_page: 100 });
+              const before = new Set((await listReviews()).map((r) => r.id));
               try {
                 await github.rest.pulls.createReview({
                   owner, repo, pull_number: pr.number, commit_id: sha, event: 'COMMENT',
@@ -274,8 +285,7 @@ jobs:
                 });
               } catch (e) {
                 // An error can arrive after GitHub stored the review; never post the findings twice.
-                const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: pr.number, per_page: 100 });
-                const stored = reviews.some((r) => r.user.type === 'Bot' && r.commit_id === sha && (r.body || '').startsWith(`Claude review of \`${short}\``));
+                const stored = (await listReviews()).some((r) => !before.has(r.id) && r.user.type === 'Bot' && r.commit_id === sha);
                 core.warning(`Batch review failed (${e.message}); ${stored ? 'it was stored anyway' : 'placing findings one by one'}.`);
                 for (const f of stored ? [] : findings) {
                   try {
