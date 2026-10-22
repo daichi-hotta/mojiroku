@@ -51,12 +51,31 @@ jobs:
           fetch-depth: 0
 
       - name: Write review context
+        id: context
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const fs = require('fs');
             const pr = context.payload.pull_request;
             const { owner, repo } = context.repo;
+            // A re-run of an older run would review a stale commit and overwrite the current summary.
+            const { data: live } = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
+            if (live.head.sha !== pr.head.sha) {
+              core.notice(`Skipped: ${pr.head.sha.slice(0, 7)} is no longer the PR head (${live.head.sha.slice(0, 7)}).`);
+              core.setOutput('stale', 'true');
+              return;
+            }
+            // Our JSON block is the last marker in the summary; Claude's text cannot contain one (see clean).
+            function readUnplaced(body) {
+              const tag = '<!-- claude-review:unplaced ';
+              const i = body ? body.lastIndexOf(tag) : -1;
+              if (i < 0) return [];
+              try {
+                return JSON.parse(body.slice(i + tag.length, body.indexOf(' -->', i)));
+              } catch (e) {
+                return [];
+              }
+            }
             const reviewComments = await github.paginate(github.rest.pulls.listReviewComments, {
               owner, repo, pull_number: pr.number, per_page: 100,
             });
@@ -74,8 +93,7 @@ jobs:
               owner, repo, issue_number: pr.number, per_page: 100,
             });
             const summary = issueComments.find((c) => c.user.type === 'Bot' && c.body.includes('<!-- claude-review:summary -->'));
-            const m = summary && summary.body.match(/<!-- claude-review:unplaced (\[.*?\]) -->/s);
-            for (const f of m ? JSON.parse(m[1]) : []) prior.push(`- ${f.path}:${f.line} (summary only): ${f.severity} · ${f.title}`);
+            for (const f of readUnplaced(summary && summary.body)) prior.push(`- ${f.path}:${f.line} (summary only): ${f.severity} · ${f.title}`);
             const text = [
               `# PR #${pr.number}: ${pr.title}`,
               '',
@@ -96,6 +114,7 @@ jobs:
 
       - name: Review with Claude
         id: claude
+        if: steps.context.outputs.stale != 'true'
         # Shorter than the job timeout, so a slow review still reaches the post step and is reported.
         timeout-minutes: 25
         uses: anthropics/claude-code-action@6b6870e649b5ff408753befeaee5fc7989d4e6a9 # v1.0.258
@@ -160,7 +179,7 @@ jobs:
             --json-schema '{"type":"object","additionalProperties":false,"required":["summary","findings","resolved_prior"],"properties":{"summary":{"type":"string"},"resolved_prior":{"type":"array","items":{"type":"string"}},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["severity","path","line","title","body"],"properties":{"severity":{"type":"string","enum":["P0","P1","P2"]},"path":{"type":"string"},"line":{"type":"integer","minimum":1},"start_line":{"type":"integer","minimum":1},"title":{"type":"string"},"body":{"type":"string"}}}}}}'
 
       - name: Post the review
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.context.outputs.stale != 'true' }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           REVIEW_JSON: ${{ steps.claude.outputs.structured_output }}
@@ -175,6 +194,19 @@ jobs:
             const FINDING = '<!-- claude-review:finding -->';
             const ICON = { P0: '🔴', P1: '🟠', P2: '🟡' };
             const RANK = { P0: 0, P1: 1, P2: 2 };
+            // Claude's text must not open an HTML comment: it would hide the rest or fake a marker.
+            const clean = (s) => String(s || '').replace(/<!--/g, '&lt;!--');
+            // Our JSON block is the last marker in the summary; Claude's text cannot contain one (see clean).
+            function readUnplaced(body) {
+              const tag = '<!-- claude-review:unplaced ';
+              const i = body ? body.lastIndexOf(tag) : -1;
+              if (i < 0) return [];
+              try {
+                return JSON.parse(body.slice(i + tag.length, body.indexOf(' -->', i)));
+              } catch (e) {
+                return [];
+              }
+            }
 
             const issueComments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number: pr.number, per_page: 100,
@@ -196,14 +228,29 @@ jobs:
             } catch (e) {
               review = null;
             }
+            const heading = (f) => `**${ICON[f.severity]} ${f.severity} · ${f.title}**`;
+            function summaryOnlySection(list) {
+              if (!list.length) return [];
+              const out = ['', '**Findings outside the diff**'];
+              for (const f of list) out.push('', `${heading(f)} — \`${f.path}:${f.line}\``, '', f.body);
+              // JSON stays inside an HTML comment, so escape every "-" to keep "--" out of it.
+              const keep = list.map(({ severity, path, line, title, body }) => ({ severity, path, line, title, body }));
+              out.push('', `<!-- claude-review:unplaced ${JSON.stringify(keep).replace(/-/g, '\\u002d')} -->`);
+              return out;
+            }
+            const earlier = readUnplaced(previous && previous.body);
+
             if (!review || !Array.isArray(review.findings)) {
-              await upsertSummary(`⚠️ The review of \`${short}\` did not finish. Nothing was checked; see the run log.`);
+              // Keep findings that live only in the previous summary, so a failed run does not drop them.
+              const note = `⚠️ The review of \`${short}\` did not finish. Nothing was checked; see the run log.`;
+              await upsertSummary([note, ...summaryOnlySection(earlier)].join('\n'));
               core.setFailed('Claude returned no structured review.');
               return;
             }
 
-            const findings = [...review.findings].sort((a, b) => RANK[a.severity] - RANK[b.severity]);
-            const heading = (f) => `**${ICON[f.severity]} ${f.severity} · ${f.title}**`;
+            const findings = review.findings
+              .map((f) => ({ ...f, title: clean(f.title), body: clean(f.body) }))
+              .sort((a, b) => RANK[a.severity] - RANK[b.severity]);
             const lineComment = (f) => {
               const c = { path: f.path, line: f.line, side: 'RIGHT', body: `${heading(f)}\n\n${f.body}\n\n${FINDING}` };
               if (f.start_line && f.start_line < f.line) Object.assign(c, { start_line: f.start_line, start_side: 'RIGHT' });
@@ -226,8 +273,11 @@ jobs:
                   comments: findings.map(lineComment),
                 });
               } catch (e) {
-                core.warning(`Batch review failed (${e.message}); placing findings one by one.`);
-                for (const f of findings) {
+                // An error can arrive after GitHub stored the review; never post the findings twice.
+                const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: pr.number, per_page: 100 });
+                const stored = reviews.some((r) => r.user.type === 'Bot' && r.commit_id === sha && (r.body || '').startsWith(`Claude review of \`${short}\``));
+                core.warning(`Batch review failed (${e.message}); ${stored ? 'it was stored anyway' : 'placing findings one by one'}.`);
+                for (const f of stored ? [] : findings) {
                   try {
                     await github.rest.pulls.createReviewComment({ owner, repo, pull_number: pr.number, commit_id: sha, ...lineComment(f) });
                     continue;
@@ -248,24 +298,17 @@ jobs:
             }
 
             // Summary-only findings from earlier runs stay listed until Claude reports them fixed.
-            const resolved = new Set(review.resolved_prior || []);
-            const m = previous && previous.body.match(/<!-- claude-review:unplaced (\[.*?\]) -->/s);
-            const carried = (m ? JSON.parse(m[1]) : []).filter((f) => ![...resolved].some((r) => r.includes(f.title)));
+            const resolved = new Set((review.resolved_prior || []).map(clean));
+            const carried = earlier.filter((f) => ![...resolved].some((r) => r.includes(f.title)));
             const summaryOnly = [...unplaced, ...carried];
 
             const n = (s) => findings.filter((f) => f.severity === s).length;
             const lines = [findings.length
               ? `Commit \`${short}\`: ${findings.length} new finding(s) (P0 ${n('P0')} · P1 ${n('P1')} · P2 ${n('P2')}).`
               : `Commit \`${short}\`: no new findings.`];
-            lines.push('', review.summary || '');
+            lines.push('', clean(review.summary));
             if (resolved.size) {
               lines.push('', '**Fixed since the last review**', ...[...resolved].map((t) => `- ${t}`));
             }
-            if (summaryOnly.length) {
-              lines.push('', '**Findings outside the diff**');
-              for (const f of summaryOnly) lines.push('', `${heading(f)} — \`${f.path}:${f.line}\``, '', f.body);
-              // JSON stays inside an HTML comment, so escape every "-" to keep "--" out of it.
-              const keep = summaryOnly.map(({ severity, path, line, title, body }) => ({ severity, path, line, title, body }));
-              lines.push('', `<!-- claude-review:unplaced ${JSON.stringify(keep).replace(/-/g, '\\u002d')} -->`);
-            }
+            lines.push(...summaryOnlySection(summaryOnly));
             await upsertSummary(lines.join('\n'));
