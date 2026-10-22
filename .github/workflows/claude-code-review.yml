@@ -1,30 +1,25 @@
-# 自分が出した PR を Claude に自動レビューさせる。
+# Claude reviews every push to a same-repository PR, alongside the Codex Cloud review.
 #
-# 出典: https://code.claude.com/docs/en/github-actions の "Run a skill"（Code Review）。
-# 公式例に対して、このリポジトリの事情から4点を追加している:
-#   1. fork PR を除外する job レベルの if:（後述）
-#   2. concurrency — 連続 push でレビューが積み上がるのを防ぐ（サブスク枠の節約）
-#   3. timeout-minutes — CLAUDE.md が大きいので暴走を止める
-#   4. --model — 既定（実測では claude-sonnet-5）ではなく Opus 5 を使う
+# This file is identical in mojiroku, babyloop-dev and shape-polydisperse-granular-dev.
+# Change all three together. Background and measurements: daichi-hotta/ops#ISSUE.
 #
-# ⚠️ --max-turns は入れないこと。公式例には無く、2026-08-22 に 30 を入れたところ
-#    小さな PR（2ファイル）でも上限に到達してジョブが落ちた。暴走の歯止めは
-#    timeout-minutes 側で足りる。
+# Design (each point answers a failure of the earlier setup, removed or replaced on 2026-10-22):
+#   - Claude only reads and returns JSON (--json-schema). The last step posts the result.
+#     The earlier code-review plugin posted by itself and often posted nothing: it skipped
+#     PRs it had already commented on and dropped most findings by design.
+#   - Every tool Claude needs is listed in --allowedTools. One earlier run hit 40 permission
+#     denials and still reported "No issues found".
+#   - If Claude returns nothing, the summary comment says so and the job fails. A broken
+#     review must not look like a clean one.
+#   - Actions are pinned to commit SHAs. On 2026-09-13 a floating @v1 broke every run.
 #
-# ⚠️ 除外は必ず job レベルの if: で書くこと。ワークフローレベルの paths:/branches:
-#    フィルタでスキップすると、将来これを required status check にしたときに
-#    PR が "Waiting for status to be reported" で永久にブロックされる。
-#    job レベルの if: でスキップされた job は success 扱いになる。
+# Constraints kept from the earlier setup:
+#   - Fork PRs are skipped with a job-level `if:` (a skipped job reports success, so this
+#     stays safe if the check becomes required). Never use pull_request_target here.
+#   - No --max-turns. A limit of 30 stopped a two-file review on 2026-08-22.
 #
-# ⚠️ pull_request_target は使わない。fork のコードを base の secrets 付きで動かすことになり、
-#    「fork PR から secrets に到達する経路が無い」という本リポジトリの性質を壊す。
-#
-# ℹ️ run が success でもコメントが 0 件のことがある。**壊れているとは限らない。**
-#    公式ドキュメントによると Claude は次を意図的に飛ばす:
-#    draft / closed の PR、レビュー不要と判断した PR（自動生成や些細なもの）、
-#    既に Claude のコメントが付いている PR。
-#    実際に壊れているかは run のログの `permission_denials_count` を見る
-#    （0 でなければツールが拒否されている＝設定の問題）。
+# Authentication: CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token` (Max subscription,
+# valid one year). Runs use the subscription's usage limits, not API billing.
 
 name: Claude Code Review
 
@@ -32,58 +27,200 @@ on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
 
-# 同じ PR への連続 push では、古いレビューを打ち切って最新だけ残す。
 concurrency:
   group: claude-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   review:
-    # fork からの PR ではジョブごとスキップする。
-    # 書かないと action の actor 権限チェックで fail し、外部 PR のたびに赤い × が付く
-    # （GitHub は fork PR に secrets を渡さないので、走らせても成功しない）。
-    # なおこの書き方は GitHub 標準のイディオムで、Anthropic 公式例には無い。
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
-      pull-requests: read
-      issues: read
-      id-token: write # Claude GitHub App の OIDC 認証に必須
+      pull-requests: write # the last step posts the review with GITHUB_TOKEN
+      issues: write # the summary is a PR conversation comment
+      id-token: write # required by claude-code-action
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          fetch-depth: 1
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
 
-      - uses: anthropics/claude-code-action@v1
+      - name: Write review context
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
-          # サブスクリプション（Max）のトークンを使う。API 従量課金は発生しない。
-          # 発行は `claude setup-token`（有効期間1年）。
+          script: |
+            const fs = require('fs');
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const comments = await github.paginate(github.rest.pulls.listReviewComments, {
+              owner, repo, pull_number: pr.number, per_page: 100,
+            });
+            const prior = comments
+              .filter((c) => c.body.includes('<!-- claude-review:finding -->'))
+              .map((c) => {
+                const title = c.body.split('\n')[0].replace(/\*\*/g, '');
+                const where = c.line == null ? `${c.path} (outdated)` : `${c.path}:${c.line}`;
+                return `- ${where}: ${title}`;
+              });
+            const text = [
+              `# PR #${pr.number}: ${pr.title}`,
+              '',
+              `- base: ${pr.base.sha} (${pr.base.ref})`,
+              `- head: ${pr.head.sha} (${pr.head.ref})`,
+              '',
+              '## Description',
+              '',
+              pr.body || '(empty)',
+              '',
+              '## Earlier Claude findings on this PR',
+              '',
+              prior.length ? prior.join('\n') : 'None.',
+              '',
+            ].join('\n');
+            fs.mkdirSync('.claude-review', { recursive: true });
+            fs.writeFileSync('.claude-review/context.md', text);
+
+      - name: Review with Claude
+        id: claude
+        uses: anthropics/claude-code-action@6b6870e649b5ff408753befeaee5fc7989d4e6a9 # v1.0.258
+        with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
-          plugins: "code-review@claude-code-plugins"
-          prompt: "/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
-          # --comment が無いと PR に何も投稿されず、結果は run のログにしか出ない。
-          #
-          # --allowedTools は**公式例どおり MCP ツール 1 つだけ**にする。
-          # 公式ドキュメント（code.claude.com/docs/en/github-actions の "Run a skill"）が
-          # 理由を書いている:
-          #   - この 1 行が要るのは、inline comment を投稿する MCP サーバーを action が
-          #     起動する条件が「--allowedTools がそれを名指ししていること」だから
-          #   - **skill を呼ぶ場合、それ以外のツールは skill 自身の allowed-tools
-          #     frontmatter が与える**（"Claude can use the tools its allowed-tools
-          #     frontmatter grants"）
-          #
-          # ⚠️ 2026-08-22 に Bash(gh …) を列挙する形へ広げたが、公式の想定と違う形だった。
-          #    2026-08-29 の #46 の run は success かつ permission_denials_count: 1 で、
-          #    5 ターンで終わりコメントを投稿しなかった。公式例へ戻す。
-          # --model: 明示しないと Claude Code の既定（実測では claude-sonnet-5）になる。
-          #   2026-08-30 に Opus 5 へ引き上げた。docs のみの PR でも事実誤認を 2 件突いた
-          #   実績が Sonnet にもあるが、コード変更のレビューではより深く見てほしいため。
-          #   ⚠️ サブスク枠の消費は増える（Sonnet の実測で 1 run あたり $2.49 相当・20 ターン・約 8 分）。
-          #   重すぎると感じたら claude-sonnet-5 へ戻す。
-          # --allowedTools: 公式例どおり MCP ツール 1 つだけ（理由は上の 2 ブロック）。
-          claude_args: >-
-            --model claude-opus-5
-            --allowedTools "mcp__github_inline_comment__create_inline_comment" 
+          prompt: |
+            You are reviewing pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+            The working tree is checked out at the PR head. Your findings are suggestions; you do not approve or block.
+
+            Inputs
+            - Read .claude-review/context.md first: PR title, description, base and head SHAs, and findings you already posted on earlier commits.
+            - The change under review is `git diff BASE...HEAD`, using the two SHAs from context.md.
+
+            Steps
+            1. Read `git diff --stat BASE...HEAD`, then the full diff.
+            2. For each changed function, read its callers, callees, related configuration and tests with Read and Grep. Check behavior outside the diff, not only the changed lines.
+            3. Read the repository's AGENTS.md or CLAUDE.md (root and the directories of changed files) and check the change against the rules that apply to those files.
+            4. Before keeping a finding, confirm in the actual code that it happens. Drop anything you cannot confirm.
+
+            What to report
+            - P0: data loss, a security hole, or the product cannot start or release.
+            - P1: ordinary use breaks or gives wrong results; should be fixed before merge.
+            - P2: wrong behavior under a specific but realistic condition (a race, cancellation, an edge input, a platform difference), or a clear violation of a quoted AGENTS.md or CLAUDE.md rule.
+            - Report a conditional bug as P2 when the condition can realistically occur. Do not drop it because it depends on inputs or state.
+            - Report every confirmed problem. Merge findings that share one root cause into one.
+            - Do not report: style or naming preferences, missing comments, anything a linter or compiler would catch, problems that existed before this PR unless the PR makes them worse, or speculation.
+
+            Earlier findings
+            - Do not repeat a finding listed in context.md.
+            - If the new code fixes one, put its title in resolved_prior.
+
+            Output
+            - path is relative to the repository root. line is the line number in the head version, confirmed with Read. Pick a line inside the diff (an added line or a nearby context line). Use start_line for a multi-line range.
+            - title: one short sentence naming the problem.
+            - body: what goes wrong (a concrete input or sequence), why, and how to fix it. Three to six sentences. Quote the rule when citing AGENTS.md or CLAUDE.md.
+            - summary: two to four sentences on what you checked and where you looked hardest. Write it even when there are no findings.
+            - Write titles, bodies and the summary in the language this repository's AGENTS.md or CLAUDE.md prescribes for PR reviews; use English if it says nothing.
+            - Do not post to GitHub, edit files, build, or run tests. A later step posts your JSON result.
+          claude_args: |
+            --model claude-opus-5-5
+            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(gh pr view:*),Bash(gh pr diff:*)"
+            --json-schema '{"type":"object","additionalProperties":false,"required":["summary","findings","resolved_prior"],"properties":{"summary":{"type":"string"},"resolved_prior":{"type":"array","items":{"type":"string"}},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["severity","path","line","title","body"],"properties":{"severity":{"type":"string","enum":["P0","P1","P2"]},"path":{"type":"string"},"line":{"type":"integer","minimum":1},"start_line":{"type":"integer","minimum":1},"title":{"type":"string"},"body":{"type":"string"}}}}}}'
+
+      - name: Keep the Claude transcript (test branch only)
+        if: ${{ always() && steps.claude.outputs.execution_file != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: claude-execution
+          path: ${{ steps.claude.outputs.execution_file }}
+          retention-days: 1
+
+      - name: Post the review
+        if: ${{ !cancelled() }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REVIEW_JSON: ${{ steps.claude.outputs.structured_output }}
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const sha = pr.head.sha;
+            const short = sha.slice(0, 7);
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const SUMMARY = '<!-- claude-review:summary -->';
+            const FINDING = '<!-- claude-review:finding -->';
+            const ICON = { P0: '🔴', P1: '🟠', P2: '🟡' };
+            const RANK = { P0: 0, P1: 1, P2: 2 };
+
+            async function upsertSummary(text) {
+              const body = `${SUMMARY}\n## Claude review\n\n${text}\n\n<sub>[Workflow run](${runUrl})</sub>`;
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: pr.number, per_page: 100,
+              });
+              const mine = comments.find((c) => c.user.type === 'Bot' && c.body.includes(SUMMARY));
+              if (mine) {
+                await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
+              }
+            }
+
+            let review = null;
+            try {
+              review = JSON.parse(process.env.REVIEW_JSON || '');
+            } catch (e) {
+              review = null;
+            }
+            if (!review || !Array.isArray(review.findings)) {
+              await upsertSummary(`⚠️ The review of \`${short}\` did not finish. Nothing was checked; see the run log.`);
+              core.setFailed('Claude returned no structured review.');
+              return;
+            }
+
+            const findings = [...review.findings].sort((a, b) => RANK[a.severity] - RANK[b.severity]);
+            const heading = (f) => `**${ICON[f.severity]} ${f.severity} · ${f.title}**`;
+            const toComment = (f) => {
+              const c = { path: f.path, line: f.line, side: 'RIGHT', body: `${heading(f)}\n\n${f.body}\n\n${FINDING}` };
+              if (f.start_line && f.start_line < f.line) Object.assign(c, { start_line: f.start_line, start_side: 'RIGHT' });
+              return c;
+            };
+
+            // One review keeps it to one notification. If GitHub rejects any line, post one by one.
+            const unplaced = [];
+            if (findings.length) {
+              const counts = ['P0', 'P1', 'P2']
+                .map((s) => [s, findings.filter((f) => f.severity === s).length])
+                .filter(([, n]) => n)
+                .map(([s, n]) => `${ICON[s]} ${s} ×${n}`)
+                .join(' · ');
+              try {
+                await github.rest.pulls.createReview({
+                  owner, repo, pull_number: pr.number, commit_id: sha, event: 'COMMENT',
+                  body: `Claude review of \`${short}\`: ${counts}`,
+                  comments: findings.map(toComment),
+                });
+              } catch (e) {
+                core.warning(`Batch review failed (${e.message}); posting one by one.`);
+                for (const f of findings) {
+                  try {
+                    await github.rest.pulls.createReviewComment({ owner, repo, pull_number: pr.number, commit_id: sha, ...toComment(f) });
+                  } catch (err) {
+                    core.warning(`Could not place ${f.path}:${f.line}: ${err.message}`);
+                    unplaced.push(f);
+                  }
+                }
+              }
+            }
+
+            const lines = [];
+            const n = (s) => findings.filter((f) => f.severity === s).length;
+            lines.push(findings.length
+              ? `Commit \`${short}\`: ${findings.length} finding(s) (P0 ${n('P0')} · P1 ${n('P1')} · P2 ${n('P2')}).`
+              : `Commit \`${short}\`: no findings.`);
+            lines.push('', review.summary || '');
+            if (review.resolved_prior && review.resolved_prior.length) {
+              lines.push('', '**Fixed since the last review**', ...review.resolved_prior.map((t) => `- ${t}`));
+            }
+            if (unplaced.length) {
+              lines.push('', '**Findings that could not be placed on a diff line**');
+              for (const f of unplaced) lines.push('', `${heading(f)} — \`${f.path}:${f.line}\``, '', f.body);
+            }
+            await upsertSummary(lines.join('\n'));
