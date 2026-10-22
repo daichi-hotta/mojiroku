@@ -94,7 +94,7 @@ jobs:
             const issueComments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number: pr.number, per_page: 100,
             });
-            const summary = issueComments.find((c) => c.user.type === 'Bot' && c.body.includes('<!-- claude-review:summary -->'));
+            const summary = issueComments.find((c) => c.user.login === 'github-actions[bot]' && c.body.includes('<!-- claude-review:summary -->'));
             for (const f of readUnplaced(summary && summary.body)) prior.push(`- ${f.path}:${f.line} (summary only): ${f.severity} · ${f.title}`);
             const text = [
               `# PR #${pr.number}: ${pr.title}`,
@@ -163,8 +163,8 @@ jobs:
             - Do not report: style or naming preferences, missing comments, anything a linter or compiler would catch, or problems that existed before this PR unless the PR makes them worse.
 
             Earlier findings
-            - Do not repeat a finding listed in context.md.
-            - If the new code fixes one, put its title in resolved_prior.
+            - Do not repeat a finding listed in context.md, unless it is marked (outdated) and the problem is still in the new code.
+            - If the new code fixes one, copy the text after its location in context.md into resolved_prior, word for word.
 
             Output
             - path is relative to the repository root. line is the line number in the head version, confirmed with Read. Pick a line inside the diff (an added line or a nearby context line). Use start_line for a multi-line range.
@@ -220,7 +220,7 @@ jobs:
             const issueComments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number: pr.number, per_page: 100,
             });
-            const previous = issueComments.find((c) => c.user.type === 'Bot' && c.body.includes(SUMMARY));
+            const previous = issueComments.find((c) => c.user.login === 'github-actions[bot]' && c.body.includes(SUMMARY));
 
             async function upsertSummary(text) {
               const body = `${SUMMARY}\n## Claude review\n\n${text}\n\n<sub>[Workflow run](${runUrl})</sub>`;
@@ -285,7 +285,7 @@ jobs:
                 });
               } catch (e) {
                 // An error can arrive after GitHub stored the review; never post the findings twice.
-                const stored = (await listReviews()).some((r) => !before.has(r.id) && r.user.type === 'Bot' && r.commit_id === sha);
+                const stored = (await listReviews()).some((r) => !before.has(r.id) && r.user.login === 'github-actions[bot]' && r.commit_id === sha);
                 core.warning(`Batch review failed (${e.message}); ${stored ? 'it was stored anyway' : 'placing findings one by one'}.`);
                 for (const f of stored ? [] : findings) {
                   try {
