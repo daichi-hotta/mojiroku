@@ -699,6 +699,8 @@ const ja = {
     "error.recording.meeting_silent":
       "会議の音声がほぼ無音でした（許可の失効や相手/自分のミュートを確認してください）",
     "error.recording.not_found": "録音が見つかりません",
+    "error.recording.unsupported_file": "対応していないファイル形式です",
+    "error.recording.not_a_file": "通常のファイルではないため取り込めません（フォルダなどは選べません）",
     "error.system_audio.busy": "すでにシステム音声をキャプチャ中です",
     "error.system_audio.permission":
       "システム音声の権限を取得できませんでした（システム設定 > プライバシーとセキュリティ > 画面とシステムオーディオの収録 で mojiroku を許可してください）",

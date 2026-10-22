@@ -691,6 +691,8 @@ const en: Dict = {
     "error.recording.meeting_silent":
       "The meeting audio was almost silent (check that the permission is still granted and that neither side is muted)",
     "error.recording.not_found": "Recording not found",
+    "error.recording.unsupported_file": "Unsupported file type",
+    "error.recording.not_a_file": "Only regular files can be imported (folders and similar items are not supported)",
     "error.system_audio.busy": "Already capturing system audio",
     "error.system_audio.permission":
       "Couldn't get system-audio permission (allow mojiroku in System Settings > Privacy & Security > Screen & System Audio Recording)",
