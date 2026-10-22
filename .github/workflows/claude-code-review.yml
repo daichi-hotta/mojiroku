@@ -1,30 +1,29 @@
-# 自分が出した PR を Claude に自動レビューさせる。
+# Claude reviews every push to a same-repository PR, alongside the Codex Cloud review.
 #
-# 出典: https://code.claude.com/docs/en/github-actions の "Run a skill"（Code Review）。
-# 公式例に対して、このリポジトリの事情から4点を追加している:
-#   1. fork PR を除外する job レベルの if:（後述）
-#   2. concurrency — 連続 push でレビューが積み上がるのを防ぐ（サブスク枠の節約）
-#   3. timeout-minutes — CLAUDE.md が大きいので暴走を止める
-#   4. --model — 既定（実測では claude-sonnet-5）ではなく Opus 5 を使う
+# This file is identical in mojiroku, babyloop-dev and shape-polydisperse-granular-dev.
+# Change all three together. Background and measurements: daichi-hotta/ops#61.
 #
-# ⚠️ --max-turns は入れないこと。公式例には無く、2026-08-22 に 30 を入れたところ
-#    小さな PR（2ファイル）でも上限に到達してジョブが落ちた。暴走の歯止めは
-#    timeout-minutes 側で足りる。
+# Design (each point answers a failure of the earlier setup, removed or replaced on 2026-10-22):
+#   - Claude only reads and returns JSON (--json-schema). The last step posts the result.
+#     The earlier code-review plugin posted by itself and often posted nothing: it skipped
+#     PRs it had already commented on and dropped most findings by design.
+#   - Every tool Claude needs is listed in --allowedTools. One earlier run hit 40 permission
+#     denials and still reported "No issues found".
+#   - Changed files are split across parallel subagents that read them in full, and the main
+#     agent verifies their candidates. A single agent stopped after a few partial reads and
+#     missed most of the findings Codex had made on the same diffs.
+#   - If Claude returns nothing, the summary comment says so and the job fails. A broken
+#     review must not look like a clean one.
+#   - Actions are pinned to commit SHAs. On 2026-09-13 a floating @v1 broke every run.
+#   - The action runs with GITHUB_TOKEN, so the Claude GitHub App is not needed (see github_token).
 #
-# ⚠️ 除外は必ず job レベルの if: で書くこと。ワークフローレベルの paths:/branches:
-#    フィルタでスキップすると、将来これを required status check にしたときに
-#    PR が "Waiting for status to be reported" で永久にブロックされる。
-#    job レベルの if: でスキップされた job は success 扱いになる。
+# Constraints kept from the earlier setup:
+#   - Fork PRs are skipped with a job-level `if:` (a skipped job reports success, so this
+#     stays safe if the check becomes required). Never use pull_request_target here.
+#   - No --max-turns. A limit of 30 stopped a two-file review on 2026-08-22.
 #
-# ⚠️ pull_request_target は使わない。fork のコードを base の secrets 付きで動かすことになり、
-#    「fork PR から secrets に到達する経路が無い」という本リポジトリの性質を壊す。
-#
-# ℹ️ run が success でもコメントが 0 件のことがある。**壊れているとは限らない。**
-#    公式ドキュメントによると Claude は次を意図的に飛ばす:
-#    draft / closed の PR、レビュー不要と判断した PR（自動生成や些細なもの）、
-#    既に Claude のコメントが付いている PR。
-#    実際に壊れているかは run のログの `permission_denials_count` を見る
-#    （0 でなければツールが拒否されている＝設定の問題）。
+# Authentication: CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token` (Max subscription,
+# valid one year). Runs use the subscription's usage limits, not API billing.
 
 name: Claude Code Review
 
@@ -32,58 +31,294 @@ on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
 
-# 同じ PR への連続 push では、古いレビューを打ち切って最新だけ残す。
+# A new push cancels the review of the previous one. A manual re-run gets its own group, so an
+# outdated re-run cannot cancel the current review; it then skips itself (see the context step).
 concurrency:
-  group: claude-review-${{ github.event.pull_request.number }}
+  group: claude-review-${{ github.event.pull_request.number }}${{ github.run_attempt != '1' && format('-rerun-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
   review:
-    # fork からの PR ではジョブごとスキップする。
-    # 書かないと action の actor 権限チェックで fail し、外部 PR のたびに赤い × が付く
-    # （GitHub は fork PR に secrets を渡さないので、走らせても成功しない）。
-    # なおこの書き方は GitHub 標準のイディオムで、Anthropic 公式例には無い。
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
-      pull-requests: read
-      issues: read
-      id-token: write # Claude GitHub App の OIDC 認証に必須
+      pull-requests: write # the last step posts the review with GITHUB_TOKEN
+      issues: write # the summary is a PR conversation comment
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          fetch-depth: 1
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
 
-      - uses: anthropics/claude-code-action@v1
+      - name: Write review context
+        id: context
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
-          # サブスクリプション（Max）のトークンを使う。API 従量課金は発生しない。
-          # 発行は `claude setup-token`（有効期間1年）。
+          script: |
+            const fs = require('fs');
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            // A re-run of an older run would review a stale commit and overwrite the current summary.
+            const { data: live } = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
+            if (live.head.sha !== pr.head.sha) {
+              core.notice(`Skipped: ${pr.head.sha.slice(0, 7)} is no longer the PR head (${live.head.sha.slice(0, 7)}).`);
+              core.setOutput('stale', 'true');
+              return;
+            }
+            // Our JSON block is the last marker in the summary; Claude's text cannot contain one (see clean).
+            function readUnplaced(body) {
+              const tag = '<!-- claude-review:unplaced ';
+              const i = body ? body.lastIndexOf(tag) : -1;
+              if (i < 0) return [];
+              try {
+                return JSON.parse(body.slice(i + tag.length, body.indexOf(' -->', i)));
+              } catch (e) {
+                return [];
+              }
+            }
+            const reviewComments = await github.paginate(github.rest.pulls.listReviewComments, {
+              owner, repo, pull_number: pr.number, per_page: 100,
+            });
+            const prior = reviewComments
+              .filter((c) => c.body.includes('<!-- claude-review:finding -->'))
+              .map((c) => {
+                const title = c.body.split('\n')[0].replace(/\*\*/g, '');
+                let where = `${c.path}:${c.line}`;
+                if (c.subject_type === 'file') where = `${c.path} (file comment)`;
+                else if (c.line == null) where = `${c.path} (outdated)`;
+                return `- ${where}: ${title}`;
+              });
+            // Findings that could not be placed on the diff live in the summary comment.
+            const issueComments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: pr.number, per_page: 100,
+            });
+            const summary = issueComments.find((c) => c.user.login === 'github-actions[bot]' && c.body.includes('<!-- claude-review:summary -->'));
+            for (const f of readUnplaced(summary && summary.body)) prior.push(`- ${f.path}:${f.line} (summary only): ${f.severity} · ${f.title}`);
+            const text = [
+              `# PR #${pr.number}: ${pr.title}`,
+              '',
+              `- base: ${pr.base.sha} (${pr.base.ref})`,
+              `- head: ${pr.head.sha} (${pr.head.ref})`,
+              '',
+              '## Description',
+              '',
+              pr.body || '(empty)',
+              '',
+              '## Earlier Claude findings on this PR',
+              '',
+              prior.length ? prior.join('\n') : 'None.',
+              '',
+            ].join('\n');
+            fs.mkdirSync('.claude-review', { recursive: true });
+            fs.writeFileSync('.claude-review/context.md', text);
+
+      - name: Review with Claude
+        id: claude
+        if: steps.context.outputs.stale != 'true'
+        # Shorter than the job timeout, so a slow review still reaches the post step and is reported.
+        timeout-minutes: 25
+        uses: anthropics/claude-code-action@6b6870e649b5ff408753befeaee5fc7989d4e6a9 # v1.0.258
+        with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
-          plugins: "code-review@claude-code-plugins"
-          prompt: "/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
-          # --comment が無いと PR に何も投稿されず、結果は run のログにしか出ない。
-          #
-          # --allowedTools は**公式例どおり MCP ツール 1 つだけ**にする。
-          # 公式ドキュメント（code.claude.com/docs/en/github-actions の "Run a skill"）が
-          # 理由を書いている:
-          #   - この 1 行が要るのは、inline comment を投稿する MCP サーバーを action が
-          #     起動する条件が「--allowedTools がそれを名指ししていること」だから
-          #   - **skill を呼ぶ場合、それ以外のツールは skill 自身の allowed-tools
-          #     frontmatter が与える**（"Claude can use the tools its allowed-tools
-          #     frontmatter grants"）
-          #
-          # ⚠️ 2026-08-22 に Bash(gh …) を列挙する形へ広げたが、公式の想定と違う形だった。
-          #    2026-08-29 の #46 の run は success かつ permission_denials_count: 1 で、
-          #    5 ターンで終わりコメントを投稿しなかった。公式例へ戻す。
-          # --model: 明示しないと Claude Code の既定（実測では claude-sonnet-5）になる。
-          #   2026-08-30 に Opus 5 へ引き上げた。docs のみの PR でも事実誤認を 2 件突いた
-          #   実績が Sonnet にもあるが、コード変更のレビューではより深く見てほしいため。
-          #   ⚠️ サブスク枠の消費は増える（Sonnet の実測で 1 run あたり $2.49 相当・20 ターン・約 8 分）。
-          #   重すぎると感じたら claude-sonnet-5 へ戻す。
-          # --allowedTools: 公式例どおり MCP ツール 1 つだけ（理由は上の 2 ブロック）。
-          claude_args: >-
-            --model claude-opus-5
-            --allowedTools "mcp__github_inline_comment__create_inline_comment" 
+          # The workflow's own token, not the Claude GitHub App. With the App token the action
+          # refuses to run unless this file matches the default branch, so a PR into develop
+          # fails whenever develop and main differ, and no change to this file can be tested.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            You are reviewing pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+            The working tree is checked out at the PR head. Your findings are suggestions; you do not approve or block.
+
+            Inputs
+            - Read .claude-review/context.md first: PR title, description, base and head SHAs, and findings you already posted on earlier commits.
+            - The change under review is `git diff BASE...HEAD`, using the two SHAs from context.md.
+
+            Steps
+            1. Run `git diff --stat BASE...HEAD`.
+            2. Split the changed files into one to four groups by area (for example backend, core library, frontend, scripts and evaluation). Leave out lockfiles, generated files and binary assets. Every other changed file belongs to exactly one group. Use at least one group even for a small change; the subagents do the full reading, so do not review the files yourself instead.
+            3. Launch one Task subagent per group, all in the same message, each with run_in_background set to false so its result comes back to you. Give each one the repository, BASE and HEAD, its file list, the PR title and description, the review questions below, and these instructions:
+               - Read each of your files in full at HEAD with the Read tool, without offset or limit, and read `git diff BASE...HEAD -- <your files>`.
+               - Follow calls out of your files into the rest of the repository where needed.
+               - Return every candidate problem with path, line, the input or sequence of events, and the code path that produces the wrong result. Do not filter by confidence; the reviewer verifies.
+            4. While they run, read the repository's AGENTS.md or CLAUDE.md (root and the directories of changed files) and note the rules that apply to the changed files.
+            5. Wait until every subagent has returned. Then verify each returned candidate by reading the code yourself. Keep it when you can name the input or sequence of events and the code path that produces the wrong result; you do not need to run it. Drop the rest, and merge candidates that share one root cause.
+
+            Review questions (give these to every subagent)
+            - Purpose: what is this change for, according to the PR title, the description and AGENTS.md? Can it report success or look correct while that purpose is not met?
+            - Contracts: do all producers and consumers agree on limits, formats, units, enum values and defaults? Compare prompt text with the validator, the frontend with the backend, and docs or ADRs with the code.
+            - Lifecycle: what happens if the work is cancelled, retried, run twice, or interrupted by a restart? Does cancellation reach every new code path?
+            - Concurrency: between a check and the write that depends on it, can a user edit or another job change the state?
+            - Empty and cleared values: is an explicit user choice (an empty or cleared field) told apart from "never set"?
+            - Parsing and normalization: does the order of steps matter? What about input in a slightly different form (a prefix, wrapping markup, whitespace, case, another language)?
+            - Errors: is each error surfaced, swallowed, or mapped to a misleading message?
+            - Rules: does the change break a rule in AGENTS.md or CLAUDE.md that applies to the file?
+
+            What to report
+            - P0: data loss, a security hole, or the product cannot start or release.
+            - P1: ordinary use breaks or gives wrong results; should be fixed before merge.
+            - P2: wrong behavior under a specific but realistic condition (a race, cancellation, an edge input, a platform difference), or a clear violation of a quoted AGENTS.md or CLAUDE.md rule.
+            - Report a conditional bug as P2 when the condition can realistically occur. Do not drop it because it depends on inputs or state.
+            - Report every confirmed problem. Merge findings that share one root cause into one.
+            - Do not report: style or naming preferences, missing comments, anything a linter or compiler would catch, or problems that existed before this PR unless the PR makes them worse.
+
+            Earlier findings
+            - Do not repeat a finding listed in context.md, unless it is marked (outdated) and the problem is still in the new code.
+            - If the new code fixes one, copy the text after its location in context.md into resolved_prior, word for word.
+
+            Output
+            - path is relative to the repository root. line is the line number in the head version, confirmed with Read. Pick a line inside the diff (an added line or a nearby context line). Use start_line for a multi-line range.
+            - title: one short sentence naming the problem.
+            - body: what goes wrong (a concrete input or sequence), why, and how to fix it. Three to six sentences. Quote the rule when citing AGENTS.md or CLAUDE.md.
+            - summary: two to four sentences on what you checked and where you looked hardest. Write it even when there are no findings.
+            - Write titles, bodies and the summary in the language this repository's AGENTS.md or CLAUDE.md prescribes for PR reviews; use English if it says nothing.
+            - Do not post to GitHub, edit files, build, or run tests. A later step posts your JSON result.
+          # Pin reasoning effort so a change in the CLI default does not change review depth.
+          settings: '{"effortLevel": "high"}'
+          claude_args: |
+            --model claude-opus-5-5
+            --allowedTools "Task,Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(gh pr view:*),Bash(gh pr diff:*)"
+            --json-schema '{"type":"object","additionalProperties":false,"required":["summary","findings","resolved_prior"],"properties":{"summary":{"type":"string"},"resolved_prior":{"type":"array","items":{"type":"string"}},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["severity","path","line","title","body"],"properties":{"severity":{"type":"string","enum":["P0","P1","P2"]},"path":{"type":"string"},"line":{"type":"integer","minimum":1},"start_line":{"type":"integer","minimum":1},"title":{"type":"string"},"body":{"type":"string"}}}}}}'
+
+      - name: Post the review
+        if: ${{ !cancelled() && steps.context.outputs.stale != 'true' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REVIEW_JSON: ${{ steps.claude.outputs.structured_output }}
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const sha = pr.head.sha;
+            const short = sha.slice(0, 7);
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const SUMMARY = '<!-- claude-review:summary -->';
+            const FINDING = '<!-- claude-review:finding -->';
+            const ICON = { P0: '🔴', P1: '🟠', P2: '🟡' };
+            const RANK = { P0: 0, P1: 1, P2: 2 };
+            // Claude's text must not open an HTML comment: it would hide the rest or fake a marker.
+            const clean = (s) => String(s || '').replace(/<!--/g, '&lt;!--');
+            // Our JSON block is the last marker in the summary; Claude's text cannot contain one (see clean).
+            function readUnplaced(body) {
+              const tag = '<!-- claude-review:unplaced ';
+              const i = body ? body.lastIndexOf(tag) : -1;
+              if (i < 0) return [];
+              try {
+                return JSON.parse(body.slice(i + tag.length, body.indexOf(' -->', i)));
+              } catch (e) {
+                return [];
+              }
+            }
+
+            // A re-run is not cancelled by a newer push, so it may finish after the head moved on.
+            const { data: live } = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
+            if (live.head.sha !== sha) {
+              core.notice(`Not posted: ${short} is no longer the PR head (${live.head.sha.slice(0, 7)}).`);
+              return;
+            }
+
+            const issueComments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: pr.number, per_page: 100,
+            });
+            const previous = issueComments.find((c) => c.user.login === 'github-actions[bot]' && c.body.includes(SUMMARY));
+
+            async function upsertSummary(text) {
+              const body = `${SUMMARY}\n## Claude review\n\n${text}\n\n<sub>[Workflow run](${runUrl})</sub>`;
+              if (previous) {
+                await github.rest.issues.updateComment({ owner, repo, comment_id: previous.id, body });
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
+              }
+            }
+
+            let review = null;
+            try {
+              review = JSON.parse(process.env.REVIEW_JSON || '');
+            } catch (e) {
+              review = null;
+            }
+            const heading = (f) => `**${ICON[f.severity]} ${f.severity} · ${f.title}**`;
+            function summaryOnlySection(list) {
+              if (!list.length) return [];
+              const out = ['', '**Findings outside the diff**'];
+              for (const f of list) out.push('', `${heading(f)} — \`${f.path}:${f.line}\``, '', f.body);
+              // JSON stays inside an HTML comment, so escape every "-" to keep "--" out of it.
+              const keep = list.map(({ severity, path, line, title, body }) => ({ severity, path, line, title, body }));
+              out.push('', `<!-- claude-review:unplaced ${JSON.stringify(keep).replace(/-/g, '\\u002d')} -->`);
+              return out;
+            }
+            const earlier = readUnplaced(previous && previous.body);
+
+            if (!review || !Array.isArray(review.findings)) {
+              // Keep findings that live only in the previous summary, so a failed run does not drop them.
+              const note = `⚠️ The review of \`${short}\` did not finish. Nothing was checked; see the run log.`;
+              await upsertSummary([note, ...summaryOnlySection(earlier)].join('\n'));
+              core.setFailed('Claude returned no structured review.');
+              return;
+            }
+
+            const findings = review.findings
+              .map((f) => ({ ...f, title: clean(f.title), body: clean(f.body) }))
+              .sort((a, b) => RANK[a.severity] - RANK[b.severity]);
+            const lineComment = (f) => {
+              const c = { path: f.path, line: f.line, side: 'RIGHT', body: `${heading(f)}\n\n${f.body}\n\n${FINDING}` };
+              if (f.start_line && f.start_line < f.line) Object.assign(c, { start_line: f.start_line, start_side: 'RIGHT' });
+              return c;
+            };
+
+            // One review keeps it to one notification. If GitHub rejects any line, place them one by one:
+            // on the line, else as a comment on the file, else in the summary.
+            const unplaced = [];
+            if (findings.length) {
+              const counts = ['P0', 'P1', 'P2']
+                .map((s) => [s, findings.filter((f) => f.severity === s).length])
+                .filter(([, n]) => n)
+                .map(([s, n]) => `${ICON[s]} ${s} ×${n}`)
+                .join(' · ');
+              const listReviews = () => github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: pr.number, per_page: 100 });
+              const before = new Set((await listReviews()).map((r) => r.id));
+              try {
+                await github.rest.pulls.createReview({
+                  owner, repo, pull_number: pr.number, commit_id: sha, event: 'COMMENT',
+                  body: `Claude review of \`${short}\`: ${counts}`,
+                  comments: findings.map(lineComment),
+                });
+              } catch (e) {
+                // An error can arrive after GitHub stored the review; never post the findings twice.
+                const stored = (await listReviews()).some((r) => !before.has(r.id) && r.user.login === 'github-actions[bot]' && r.commit_id === sha);
+                core.warning(`Batch review failed (${e.message}); ${stored ? 'it was stored anyway' : 'placing findings one by one'}.`);
+                for (const f of stored ? [] : findings) {
+                  try {
+                    await github.rest.pulls.createReviewComment({ owner, repo, pull_number: pr.number, commit_id: sha, ...lineComment(f) });
+                    continue;
+                  } catch (err) {
+                    core.warning(`Line ${f.path}:${f.line} is not in the diff (${err.message}).`);
+                  }
+                  try {
+                    await github.rest.pulls.createReviewComment({
+                      owner, repo, pull_number: pr.number, commit_id: sha, path: f.path, subject_type: 'file',
+                      body: `${heading(f)}\n\nLine ${f.line}. ${f.body}\n\n${FINDING}`,
+                    });
+                  } catch (err) {
+                    core.warning(`Could not place ${f.path}:${f.line}: ${err.message}`);
+                    unplaced.push(f);
+                  }
+                }
+              }
+            }
+
+            // Summary-only findings from earlier runs stay listed until Claude reports them fixed.
+            const resolved = new Set((review.resolved_prior || []).map(clean));
+            const carried = earlier.filter((f) => ![...resolved].some((r) => r.includes(f.title)));
+            const summaryOnly = [...unplaced, ...carried];
+
+            const n = (s) => findings.filter((f) => f.severity === s).length;
+            const lines = [findings.length
+              ? `Commit \`${short}\`: ${findings.length} new finding(s) (P0 ${n('P0')} · P1 ${n('P1')} · P2 ${n('P2')}).`
+              : `Commit \`${short}\`: no new findings.`];
+            lines.push('', clean(review.summary));
+            if (resolved.size) {
+              lines.push('', '**Fixed since the last review**', ...[...resolved].map((t) => `- ${t}`));
+            }
+            lines.push(...summaryOnlySection(summaryOnly));
+            await upsertSummary(lines.join('\n'));
