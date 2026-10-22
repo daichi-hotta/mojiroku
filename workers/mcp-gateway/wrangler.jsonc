@@ -8,6 +8,8 @@
 //   GATEWAY_PASSPHRASE … /authorize 同意画面のパスフレーズ（自分専用ゲート）
 //   ORIGIN_TOKEN       … origin（mojiroku-mcp --http）の Bearer トークン。
 //                        Mac 側 launchd plist の MOJIROKU_MCP_TOKEN と同じ値にする
+//   CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET … 任意。mcp-origin.mojiroku.com を
+//                        Cloudflare Access（サービストークン）で守るときの資格情報
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "mojiroku-mcp-gateway",
@@ -17,5 +19,10 @@
   "kv_namespaces": [
     { "binding": "OAUTH_KV", "id": "a826ec3e7a1642c981aa13a485e73aa9" }
   ],
+  // /authorize のパスフレーズ試行を全体で数える（index.ts の AuthorizeGuard）。
+  "durable_objects": {
+    "bindings": [{ "name": "AUTHORIZE_GUARD", "class_name": "AuthorizeGuard" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AuthorizeGuard"] }],
   "observability": { "enabled": true }
 }

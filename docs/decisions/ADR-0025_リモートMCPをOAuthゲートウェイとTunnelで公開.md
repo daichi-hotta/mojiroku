@@ -63,20 +63,39 @@ claude.ai が要求する OAuth 2.1 の口（`/authorize` `/token` `/register`(D
 **`/mcp` リクエストだけ**が `apiHandler` に届き、Tunnel origin へプロキシされる。
 
 - **「ユーザー認証」は単一ユーザー用パスフレーズ**（`GATEWAY_PASSPHRASE`）。`/authorize` の同意画面で
-  入力し、定数時間比較・失敗時は一律 1 秒待たせてブルートフォースを抑止。ID 基盤は持たない
-  （議事録は単一ユーザーのローカルデータ）。
+  入力し、定数時間比較。ID 基盤は持たない（議事録は単一ユーザーのローカルデータ）。
+- **総当たりは全体の試行回数で止める**: 失敗時の 1 秒待ちはリクエストごとにしか効かず、並列に
+  投げられると意味が無い。そこで Durable Object `AuthorizeGuard`（インスタンス 1 つ）が 1 時間の窓で
+  POST の試行を数え、**照合の前に**1 回分を予約する。10 回に達すると窓が明けるまで正しい
+  パスフレーズでも 429。成功すると 0 に戻す。攻撃者が自分を締め出せるが、承認は 30 日に 1 回程度
+  なので許容する。
+- **クライアント登録と送り先は claude.ai のコールバックに限る**: DCR は誰でも叩けるため、絞らないと
+  攻撃者の URL へ認可コードを送るクライアントを登録され、正規ドメインの同意画面でパスフレーズを
+  入れた時点でトークンを持ち去られる。`clientRegistrationCallback` で `redirect_uris` を
+  `https://claude.ai/api/mcp/auth_callback` と `https://claude.com/api/mcp/auth_callback`（公式が
+  移行予定と明記）だけに制限し、`/authorize` でも同じ許可リストを確かめる（制限前に登録された
+  クライアント向け）。同意画面には送り先のホストを表示する。
+- **同意画面は埋め込ませない**: `frame-ancestors 'none'` と `X-Frame-Options: DENY`。`form-action` は
+  付けない（承認後の claude.ai への 302 まで制限され、フローが壊れる）。
 - **クライアントトークンを origin に見せない**: `/mcp` プロキシ時に `Authorization` を
   `ORIGIN_TOKEN`（＝ローカル `MOJIROKU_MCP_TOKEN` と同値）に差し替え、`cookie` は落とす。
   Response をそのまま返すことで **SSE ストリーミングと `Mcp-Session-Id` を素通し**する。
 - **DCR のクライアント名は外部入力**なので同意画面表示前に HTML エスケープする。
 - **OAuth 2.1: S256 PKCE のみ**（`allowPlainPKCE: false`）。
-- **Secrets はコード非同梱**（`wrangler secret put`）: `GATEWAY_PASSPHRASE` / `ORIGIN_TOKEN`。
+- **Secrets はコード非同梱**（`wrangler secret put`）: `GATEWAY_PASSPHRASE` / `ORIGIN_TOKEN`、
+  任意で `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`（下の 3）。
   `wrangler.jsonc` / `package.json` / `index.ts` にキー名だけ記す。
 
 ### 3. Cloudflare Tunnel（`cloudflared`）で origin を公開
 
 `mcp-origin.mojiroku.com` を `cloudflared` で `127.0.0.1:8970` に向ける。ポート開放も固定 IP も
 不要で **$0**。Tunnel より先（Mac 側）は `mojiroku-mcp` 自身の Bearer 検証が守る（多層防御）。
+
+origin のホスト名は公開 DNS にあり、そのままでは誰でも `ORIGIN_TOKEN` の推測を試せる。
+Cloudflare Access のアプリを `mcp-origin.mojiroku.com` に張り、サービストークンだけを通すポリシーに
+すると、ゲートウェイ以外は Tunnel に届く前に落ちる。ゲートウェイは `CF_ACCESS_CLIENT_ID` /
+`CF_ACCESS_CLIENT_SECRET` がそろっているときだけ `CF-Access-Client-Id` / `CF-Access-Client-Secret`
+を付けて転送する（Access の設定はダッシュボード側の個人環境の構成）。
 
 ### 4. ローカル常駐は launchd
 
