@@ -22,8 +22,8 @@ echo "placed: src-tauri/binaries/mojiroku-llm-${TRIPLE}"
 # 無く、公証で落ちるかどうかを CI で試すまで分からない。externalBin は v0.4.0 から
 # 実績がある（release.yml が Contents/MacOS/ の各バイナリの runtime フラグを検証する）。
 #
-# アプリが spawn できないことは capabilities/default.json が保証する（shell:allow-execute の
-# allow に mojiroku-llm しか無い）。externalBin に足しても許可は増えない。
+# アプリは spawn しない。webview には shell の許可を一切与えておらず（capabilities/default.json）、
+# mojiroku-llm を起動するのは Rust 側のコードだけなので、externalBin に足しても起動経路は増えない。
 #
 # 利用者は /Applications/mojiroku.app/Contents/MacOS/mojiroku-mcp を MCP 設定の
 # command に指定する（docs/mcp.md）。ビルド環境が無くても使える。
