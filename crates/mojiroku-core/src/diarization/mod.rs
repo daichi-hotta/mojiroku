@@ -233,6 +233,16 @@ impl SherpaDiarizer {
         if raw.is_empty() {
             return Ok(DiarizationResult::default());
         }
+        // Issue #65 の調査用: 畳み込み（consolidate）前の生の区切りも書き出す。
+        if let Some(path) = std::env::var_os("MOJIROKU_DEBUG_TURNS") {
+            let rows: Vec<_> = raw
+                .iter()
+                .map(|s| serde_json::json!({"start": s.start, "end": s.end, "speaker": s.speaker}))
+                .collect();
+            let mut raw_path = std::path::PathBuf::from(path);
+            raw_path.set_extension("raw.json");
+            let _ = std::fs::write(raw_path, serde_json::to_vec_pretty(&rows).unwrap_or_default());
+        }
 
         let t_cons = std::time::Instant::now();
         let (turns, centroids) = consolidate(&raw, pcm, sample_rate, &self.emb_model)?;

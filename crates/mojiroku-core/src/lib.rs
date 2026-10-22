@@ -70,6 +70,21 @@ fn download_progress<'a>(
 
 /// `(stage, 0, None)` 形のステージ開始通知を送る薄いヘルパ（各高レベル関数で重複していた
 /// `if let Some(cb) = on_progress { cb("...", 0, None); }` を集約）。
+/// 話者分離のターンを書き出す（Issue #65 の調査用）。`MOJIROKU_DEBUG_TURNS=<path>` のときだけ、
+/// 発話の話者の付き方をデバッガなしで確かめられるよう JSON で保存する。失敗しても処理は続ける。
+fn debug_dump_turns(turns: &[diarization::SpeakerTurn]) {
+    let Some(path) = std::env::var_os("MOJIROKU_DEBUG_TURNS") else {
+        return;
+    };
+    let rows: Vec<_> = turns
+        .iter()
+        .map(|t| serde_json::json!({"start_ms": t.start_ms, "end_ms": t.end_ms, "speaker_id": t.speaker_id}))
+        .collect();
+    if let Err(e) = std::fs::write(&path, serde_json::to_vec_pretty(&rows).unwrap_or_default()) {
+        eprintln!("MOJIROKU_DEBUG_TURNS: could not write {}: {e}", std::path::Path::new(&path).display());
+    }
+}
+
 /// 段階の境目。中断が求められていればここで止め（Issue #114）、そうでなければ段階を通知する。
 fn report_stage(on_progress: Option<&StageProgressFn<'_>>, stage: &str) -> Result<()> {
     cancel::check()?;
@@ -289,6 +304,8 @@ pub fn transcribe_and_diarize_file_with_options(
     // sherpa-onnx は途中で止められないので、終わった直後に確かめる（Issue #114 レビュー）。
     cancel::check()?;
 
+    debug_dump_turns(&diar.turns);
+
     // 4) マージ（話者 turn → Segment.speaker_id）
     report_stage(on_progress, "merge")?;
     merge::assign_speakers(&mut transcript, &diar);
@@ -393,6 +410,7 @@ pub fn diarize_file(
     use diarization::Diarizer;
     let diar = diarizer.diarize(&pcm, 16_000)?;
     cancel::check()?;
+    debug_dump_turns(&diar.turns);
     Ok(diar)
 }
 
