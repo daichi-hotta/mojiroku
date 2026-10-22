@@ -31,6 +31,14 @@ fn is_known_secret(name: &str) -> bool {
         || name == secrets::byok_key_name("openai")
 }
 
+/// webview から値を書き込めるスロット（BYOK の API キーだけ）。
+/// Notion / Slack / Google のトークンは Rust 側の OAuth が書く。webview から書けると、
+/// 乗っ取られた webview が自分のトークンや Webhook を仕込み、次の書き出しで議事録を
+/// 攻撃者の宛先へ送らせられるため、書き込みは BYOK に限る（has/delete は全スロット可）。
+fn is_settable_secret(name: &str) -> bool {
+    name == secrets::byok_key_name("anthropic") || name == secrets::byok_key_name("openai")
+}
+
 fn ensure_known_secret(name: &str) -> Result<(), String> {
     if is_known_secret(name) {
         Ok(())
@@ -43,7 +51,9 @@ fn ensure_known_secret(name: &str) -> Result<(), String> {
 /// `(async)` でスレッドプールへ逃がす（キーチェーンの許可ダイアログ中にメインスレッドを止めない）。
 #[tauri::command(async)]
 pub(crate) fn set_secret(name: String, value: String) -> Result<(), String> {
-    ensure_known_secret(&name)?;
+    if !is_settable_secret(&name) {
+        return Err(format!("error.secret.unknown_key: {name}"));
+    }
     secrets::set(&name, &value)
 }
 
@@ -87,4 +97,27 @@ pub(crate) fn export_text_file(
     let path = path.into_path().map_err(|e| e.to_string())?;
     std::fs::write(&path, content).map_err(|e| format!("file write: {e}"))?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webview_can_set_only_byok_keys() {
+        assert!(is_settable_secret(&secrets::byok_key_name("anthropic")));
+        assert!(is_settable_secret(&secrets::byok_key_name("openai")));
+        for name in [
+            secrets::NOTION_TOKEN_KEY,
+            secrets::SLACK_WEBHOOK_KEY,
+            secrets::CALENDAR_ICAL_KEY,
+            crate::oauth::GOOGLE_ACCESS_KEY,
+            crate::oauth::GOOGLE_REFRESH_KEY,
+            crate::oauth::GOOGLE_EXPIRY_KEY,
+        ] {
+            assert!(!is_settable_secret(name), "{name} must not be settable");
+            // 連携の解除（delete）と状態表示（has）は引き続き webview から使う。
+            assert!(is_known_secret(name), "{name} must stay deletable");
+        }
+    }
 }

@@ -57,8 +57,9 @@ beta-1（録音→文字起こし→要約→履歴/検索）と Phase 2b（話�
     externalBin は llm sidecar と同じ経路で hardened runtime 署名＋公証され、release.yml が
     `Contents/MacOS/` の各バイナリの runtime フラグを検証する（v0.4.0 から実績あり）。
     bundle resources に置いた Mach-O が同様に署名される保証は取れなかった。
-    「アプリは spawn しない」は変わらない: `capabilities/default.json` の `shell:allow-execute` は
-    `mojiroku-llm` だけを許可しており、externalBin に足しても許可は増えない。
+    「アプリは spawn しない」は変わらない: webview には shell の許可を一切与えておらず
+    （`capabilities/default.json`）、`mojiroku-llm` を起動するのは Rust 側のコードだけなので、
+    externalBin に足しても起動経路は増えない。
     利用者は `/Applications/mojiroku.app/Contents/MacOS/mojiroku-mcp` を指定する。
 - 書き込み系ツール・認証・複数 DB は対象外。読み取り専用に限定することで安全側に倒す。
 

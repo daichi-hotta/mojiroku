@@ -6,19 +6,17 @@
   "permissions": [
     "core:default",
     "core:webview:allow-print",
-    "opener:default",
-    "os:default",
-    "dialog:default",
     {
-      "identifier": "shell:allow-execute",
+      "identifier": "opener:allow-open-url",
       "allow": [
-        {
-          "name": "binaries/mojiroku-llm",
-          "sidecar": true,
-          "args": true
-        }
+        { "url": "https://www.notion.so/*" },
+        { "url": "https://docs.google.com/forms/*" },
+        { "url": "https://chatgpt.com/*" },
+        { "url": "https://claude.ai/*" }
       ]
     },
+    "os:default",
+    "dialog:default",
     "updater:default",
     "process:allow-restart",
     "notification:default"
