@@ -159,7 +159,7 @@ The same check covers `binaries/mojiroku-mcp-<triple>` since 2026-09-03; the scr
 
 ## Code Review Rules
 
-PR の自動レビュー（Codex のコードレビュー）が読む規則。**見出し名は Codex 側の仕様で
+PR の自動レビュー（Codex と Claude のコードレビュー）が読む規則。**見出し名は Codex 側の仕様で
 固定**なので英語のまま置く（→ [Review GitHub pull requests with Codex](https://learn.chatgpt.com/docs/third-party/github)）。
 
 ここに書くのは「**壊れ方が静かで、知らないと踏む**」制約だけにする。書式・lint のような
@@ -200,11 +200,13 @@ PR の自動レビュー（Codex のコードレビュー）が読む規則。**
 
 - `pull_request_target` を使わない。fork のコードを base の secrets 付きで動かすことになり、
   「fork PR から secrets に到達する経路が無い」という前提が壊れる。
-- レビュー用ワークフロー（`claude-code-review.yml`）を変更したら、**同じ内容をデフォルト
-  ブランチ（`main`）にも届ける**。`anthropics/claude-code-action` は、実行しようとした
-  ワークフローファイルが default branch 上の版と**内容まで一致**していないと、警告を出して
-  自ら終了する。`develop` 側だけ直すと、以後の全 PR が「job は success なのにレビュー 0 件」
-  という**静かな無効化**に入る（2026-08-30 に実際に起きた）。
+- レビュー用ワークフロー（`claude-code-review.yml`）の `anthropics/claude-code-action` には
+  `github_token: ${{ secrets.GITHUB_TOKEN }}` を渡し、**Claude GitHub App のトークンに戻さない**。
+  App のトークンを使うと、action はワークフローファイルが default branch（`main`）上の版と
+  **内容まで一致**していないときに警告だけ出して自ら終了する。`develop` と `main` で中身が
+  違うあいだ、全 PR が「job は success なのにレビュー 0 件」という**静かな無効化**に入る
+  （2026-08-30 に実際に起きた）。このファイルは babyloop-dev・shape-polydisperse-granular-dev と
+  同じ内容なので、直すときは 3 本とも直す。
 - **PR の required status check になりうるワークフロー**でジョブを条件付きに飛ばすときは、
   ワークフローレベルの `paths:` / `branches:` ではなく **job レベルの `if:`** で書く。
   前者でスキップされた check はそもそも報告されないため、PR が
