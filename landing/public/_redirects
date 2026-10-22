@@ -5,4 +5,4 @@
 # 注意: GitHub の releases/latest/download/... は draft でも prerelease でもない「公開リリース」にしか解決しない。
 # 初回は必ずフル公開リリースで出すこと（beta 表記で出すなら latest でなく固定タグへ向ける）。
 # アセット名はバージョン非依存の安定名（mojiroku-macos-aarch64.dmg）を使い、版上げでリンクを壊さない。
-/download  https://github.com/daichi8120/mojiroku-releases/releases/latest/download/mojiroku-macos-aarch64.dmg  302
+/download  https://github.com/daichi-hotta/mojiroku-releases/releases/latest/download/mojiroku-macos-aarch64.dmg  302

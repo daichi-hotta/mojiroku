@@ -2,7 +2,7 @@
 
 - Status: implemented; release validation pending
 - Date: 2026-09-05
-- Related: [Issue #87](https://github.com/daichi8120/mojiroku/issues/87), ADR-0008, ADR-0031, ADR-0032
+- Related: [Issue #87](https://github.com/daichi-hotta/mojiroku/issues/87), ADR-0008, ADR-0031, ADR-0032
 
 ## Context
 

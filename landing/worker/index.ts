@@ -72,7 +72,7 @@ export default {
  */
 async function updaterManifest(): Promise<Response> {
   const upstream =
-    "https://github.com/daichi8120/mojiroku-releases/releases/latest/download/latest.json";
+    "https://github.com/daichi-hotta/mojiroku-releases/releases/latest/download/latest.json";
   let r: Response;
   try {
     // cf.cacheTtl/cacheEverything は Cloudflare Workers のサブリクエストキャッシュ制御。

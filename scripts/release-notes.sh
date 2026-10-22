@@ -1,7 +1,7 @@
 #!/bin/bash
 # 指定した git range の非マージコミットから、リリースノートの本文を組む。
 #
-# なぜスクリプトに出すか: リリース用 Release は別 repo（daichi8120/mojiroku-releases）に
+# なぜスクリプトに出すか: リリース用 Release は別 repo（daichi-hotta/mojiroku-releases）に
 # 作られるため、`gh release create --generate-notes` は使えない（生成元がリリース用 repo の
 # 履歴になる）。ソース repo 側で組む必要がある。
 # ワークフローの yml に直接書くと手元で試せず、壊れたときの再試行が高くつくので分離した。

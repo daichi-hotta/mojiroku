@@ -102,7 +102,7 @@ jobs:
           # /download が現ユーザー名を指しているか（旧名のまま出た事故の再発防止）。
           loc=$(curl -s -o /dev/null -w '%{redirect_url}' https://mojiroku.com/download)
           case "$loc" in
-            https://github.com/daichi8120/mojiroku-releases/*) ;;
+            https://github.com/daichi-hotta/mojiroku-releases/*) ;;
             *)
               echo "::error::/download の行き先が想定外: $loc" >&2
               exit 1
