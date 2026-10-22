@@ -100,19 +100,24 @@ jobs:
             - The change under review is `git diff BASE...HEAD`, using the two SHAs from context.md.
 
             Steps
-            1. Read `git diff --stat BASE...HEAD`, then the full diff.
-            2. Read every changed source file in full at the head version (skip lockfiles, generated files and binary assets). For a file over 800 lines, read each changed region with 150 lines around it. Then read the callers and callees of each changed function, and the related configuration, prompts and tests.
-            3. Read the repository's AGENTS.md or CLAUDE.md (root and the directories of changed files) and note the rules that apply to the changed files.
-            4. Write down candidate problems before judging any of them. For each changed behavior, ask:
-               - Contracts: do all producers and consumers agree on limits, formats, units, enum values and defaults? Compare prompt text with the validator, the frontend with the backend, and docs or ADRs with the code.
-               - Lifecycle: what happens if the work is cancelled, retried, run twice, or interrupted by a restart? Does cancellation reach every new code path?
-               - Concurrency: between a check and the write that depends on it, can a user edit or another job change the state?
-               - Empty and cleared values: is an explicit user choice (an empty or cleared field) told apart from "never set"?
-               - Parsing and normalization: does the order of steps matter? What about input in a slightly different form (a prefix, wrapping markup, whitespace, case, another language)?
-               - Errors: is each error surfaced, swallowed, or mapped to a misleading message?
-               - The AGENTS.md or CLAUDE.md rules noted in step 3.
-            5. Verify each candidate in the code. Keep it when you can name the input or sequence of events and the code path that produces the wrong result; you do not need to run it. Drop the rest.
-            6. If a change of more than 200 lines leaves you with no findings, go through step 4 once more for the files you read least closely before concluding.
+            1. Run `git diff --stat BASE...HEAD`.
+            2. Split the changed files into one to four groups by area (for example backend, core library, frontend, scripts and evaluation). Leave out lockfiles, generated files and binary assets. Every other changed file belongs to exactly one group.
+            3. Launch one Task subagent per group, all in the same message so they run in parallel. Give each one the repository, BASE and HEAD, its file list, the PR title and description, the review questions below, and these instructions:
+               - Read each of your files in full at HEAD with the Read tool, without offset or limit, and read `git diff BASE...HEAD -- <your files>`.
+               - Follow calls out of your files into the rest of the repository where needed.
+               - Return every candidate problem with path, line, the input or sequence of events, and the code path that produces the wrong result. Do not filter by confidence; the reviewer verifies.
+            4. While they run, read the repository's AGENTS.md or CLAUDE.md (root and the directories of changed files) and note the rules that apply to the changed files.
+            5. Verify each returned candidate by reading the code yourself. Keep it when you can name the input or sequence of events and the code path that produces the wrong result; you do not need to run it. Drop the rest, and merge candidates that share one root cause.
+
+            Review questions (give these to every subagent)
+            - Purpose: what is this change for, according to the PR title, the description and AGENTS.md? Can it report success or look correct while that purpose is not met?
+            - Contracts: do all producers and consumers agree on limits, formats, units, enum values and defaults? Compare prompt text with the validator, the frontend with the backend, and docs or ADRs with the code.
+            - Lifecycle: what happens if the work is cancelled, retried, run twice, or interrupted by a restart? Does cancellation reach every new code path?
+            - Concurrency: between a check and the write that depends on it, can a user edit or another job change the state?
+            - Empty and cleared values: is an explicit user choice (an empty or cleared field) told apart from "never set"?
+            - Parsing and normalization: does the order of steps matter? What about input in a slightly different form (a prefix, wrapping markup, whitespace, case, another language)?
+            - Errors: is each error surfaced, swallowed, or mapped to a misleading message?
+            - Rules: does the change break a rule in AGENTS.md or CLAUDE.md that applies to the file?
 
             What to report
             - P0: data loss, a security hole, or the product cannot start or release.
@@ -137,7 +142,7 @@ jobs:
           settings: '{"effortLevel": "high"}'
           claude_args: |
             --model claude-opus-5-5
-            --allowedTools "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(gh pr view:*),Bash(gh pr diff:*)"
+            --allowedTools "Task,Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(gh pr view:*),Bash(gh pr diff:*)"
             --json-schema '{"type":"object","additionalProperties":false,"required":["summary","findings","resolved_prior"],"properties":{"summary":{"type":"string"},"resolved_prior":{"type":"array","items":{"type":"string"}},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["severity","path","line","title","body"],"properties":{"severity":{"type":"string","enum":["P0","P1","P2"]},"path":{"type":"string"},"line":{"type":"integer","minimum":1},"start_line":{"type":"integer","minimum":1},"title":{"type":"string"},"body":{"type":"string"}}}}}}'
 
       - name: Keep the Claude transcript (test branch only)
