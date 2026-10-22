@@ -68,7 +68,7 @@
 必要 Secrets（リポジトリ Settings → Secrets）:
 - `TAURI_SIGNING_PRIVATE_KEY` = `cat ~/.tauri/mojiroku.key` の中身
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
-- `RELEASES_REPO_TOKEN` = `daichi8120/mojiroku-releases` のみに **Contents: Read and write** の fine-grained PAT
+- `RELEASES_REPO_TOKEN` = `daichi-hotta/mojiroku-releases` のみに **Contents: Read and write** の fine-grained PAT
   （デフォルト `GITHUB_TOKEN` は別 repo に書けない）。**read-only だと気づきにくい**: releases repo が public なので
   `gh release view` は通るが、`gh release create`（POST）で初めて `HTTP 403: Resource not accessible by personal access token`。
   必ず write を付与すること（未付与時のリカバリは下記「初回切替」末尾参照）。
@@ -93,7 +93,7 @@
 5. インストール済み 0.2.0 → 0.3.0 のアプリ内 E2E（通知→DL→relaunch）。→ **全段グリーンで成立**。
 
 > 未付与 PAT で publish 段（`gh release create`）が 403 で落ちても、成果物は `if: success()` で artifact 化されるため、
-> ダウンロードしてオーナーの `gh`（releases repo admin）で `gh release create -R daichi8120/mojiroku-releases ...` すれば
+> ダウンロードしてオーナーの `gh`（releases repo admin）で `gh release create -R daichi-hotta/mojiroku-releases ...` すれば
 > 再ビルド無しで手動公開できる（v0.3.0 はこの手動リカバリで公開）。`RELEASES_REPO_TOKEN` に write 付与後は自動で完結。
 
 ## 重要な前提（落とし穴）
@@ -115,15 +115,15 @@
 - ✅ 旧版（updater 入り）→ 新版リリース → 起動で通知 → 更新 → 再起動でバージョンが 0.3.0 に上がる。
 - ✅ 未署名のまま updater 適用後に Gatekeeper "damaged" が**再発しない**（前提4）。
 - オフライン時にチェックが静かに失敗し UI を邪魔しないこと（Worker 503 時も同挙動）。
-- ✅ `curl -IL https://github.com/daichi8120/mojiroku-releases/releases/latest/download/mojiroku-macos-aarch64.app.tar.gz` が最後まで 200、
+- ✅ `curl -IL https://github.com/daichi-hotta/mojiroku-releases/releases/latest/download/mojiroku-macos-aarch64.app.tar.gz` が最後まで 200、
   `curl -s https://mojiroku.com/updater/latest.json | jq .version` が `0.3.0`。
 
 
 ## Release verification (2026-09-06, v0.5.7 to v0.6.0)
 
-[v0.6.0](https://github.com/daichi8120/mojiroku-releases/releases/tag/v0.6.0) was
+[v0.6.0](https://github.com/daichi-hotta/mojiroku-releases/releases/tag/v0.6.0) was
 published from source commit `9338e8bbcc56d51bf3517c2be580cfae1cbfa64e` by
-[release run 34030466995](https://github.com/daichi8120/mojiroku/actions/runs/34030466995).
+[release run 34030466995](https://github.com/daichi-hotta/mojiroku/actions/runs/34030466995).
 The main merge tree matched the locally validated and signed dry-run source tree.
 
 | Check | Result |

@@ -86,7 +86,7 @@ export interface PrivacyPolicyCopy {
 }
 
 const APP_DIR = "~/Library/Application Support/com.daichi0812.mojiroku";
-const ISSUES = "https://github.com/daichi8120/mojiroku/issues";
+const ISSUES = "https://github.com/daichi-hotta/mojiroku/issues";
 // 連絡先。公開 repo のコミット著者として既に公開されているアドレス
 const EMAIL = "daichi8120@gmail.com";
 

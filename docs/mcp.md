@@ -121,6 +121,10 @@ openssl rand -hex 32   # これを MOJIROKU_MCP_TOKEN として使う（32 文�
 `mcp-origin.mojiroku.com` を `cloudflared` で `http://127.0.0.1:8970` に向ける（`cloudflared tunnel`）。
 これも launchd 常駐にしておく。ポート開放・固定 IP は不要で $0。
 
+推奨: Cloudflare Zero Trust で `mcp-origin.mojiroku.com` に Access アプリを作り、
+サービストークン（Service Auth）だけを許すポリシーにする。ゲートウェイ以外は Tunnel に届く前に落ちる。
+発行したトークンの Client ID / Secret は手順 4 でゲートウェイの secret に入れる。
+
 ### 4. OAuth ゲートウェイ（Cloudflare Worker）をデプロイ
 
 ソースは `workers/mcp-gateway/`。**リリース CI には載せない手動デプロイ**:
@@ -131,8 +135,15 @@ npm install
 # secrets（コード非同梱。値はローカルとゲートウェイで揃える）
 npx wrangler secret put GATEWAY_PASSPHRASE   # /authorize 同意画面のパスフレーズ
 npx wrangler secret put ORIGIN_TOKEN         # ← 手順1の MOJIROKU_MCP_TOKEN と同じ値
+# 任意（手順 3 で Access を張った場合）
+npx wrangler secret put CF_ACCESS_CLIENT_ID
+npx wrangler secret put CF_ACCESS_CLIENT_SECRET
 npx wrangler deploy                          # mcp.mojiroku.com に配信
 ```
+
+- 登録できるクライアントは claude.ai のコールバック（`https://claude.ai/api/mcp/auth_callback` と
+  `https://claude.com/api/mcp/auth_callback`）を送り先に持つものだけ。
+- パスフレーズの試行は全体で 1 時間 10 回まで。超えると 1 時間は正しいパスフレーズでも 429 になる。
 
 疎通の目安（配管が生きているか）:
 

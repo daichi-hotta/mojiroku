@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # secret 不足のまま進むと、ビルドまで通ってからデプロイだけ失敗する。先に落とす。
       - name: Cloudflare の secret を検証
@@ -52,7 +52,7 @@ jobs:
           fi
           echo "CLOUDFLARE_API_TOKEN あり"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           # Astro 7 は Node >=22.12 を要求する（20 だと build が
           # "Node.js v20 is not supported by Astro!" で落ちる。2026-08-29 に実際に落ちた）。
@@ -102,7 +102,7 @@ jobs:
           # /download が現ユーザー名を指しているか（旧名のまま出た事故の再発防止）。
           loc=$(curl -s -o /dev/null -w '%{redirect_url}' https://mojiroku.com/download)
           case "$loc" in
-            https://github.com/daichi8120/mojiroku-releases/*) ;;
+            https://github.com/daichi-hotta/mojiroku-releases/*) ;;
             *)
               echo "::error::/download の行き先が想定外: $loc" >&2
               exit 1

@@ -8,14 +8,14 @@
 #        Apple 署名とは完全独立の検証チェーン）
 #   2. 両方の署名を fail-closed で検証（minisign 不一致なら全ユーザがサイレントに更新失敗、
 #      Apple 署名/公証漏れなら初回起動で「damaged」に戻るため、ここで決定的に落とす）
-#   3. 公開 daichi8120/mojiroku-releases に draft Release を作り、全3アセット
+#   3. 公開 daichi-hotta/mojiroku-releases に draft Release を作り、全3アセット
 #      （.dmg / .app.tar.gz / latest.json）を添付 → 揃ったら publish に flip（原子的切替）
 #   4. updater マニフェスト latest.json は Release アセット。配信は mojiroku.com Worker の
 #      /updater/latest.json プロキシが latest 解決で常時追従する（landing 再デプロイ不要）
 #
 # 前提（docs/updater-plan.md 参照）:
 #   - Secrets: TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD / RELEASES_REPO_TOKEN
-#     （RELEASES_REPO_TOKEN は daichi8120/mojiroku-releases のみに contents:write の fine-grained PAT）
+#     （RELEASES_REPO_TOKEN は daichi-hotta/mojiroku-releases のみに contents:write の fine-grained PAT）
 #   - Apple 署名 Secrets: APPLE_CERTIFICATE（Developer ID Application .p12 の base64）/
 #     APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY（"Developer ID Application: ... (TEAMID)" 全文）/
 #     APPLE_API_ISSUER / APPLE_API_KEY / APPLE_API_KEY_CONTENT（App Store Connect API キー。notarytool 用）
@@ -59,7 +59,7 @@ jobs:
       dry_run: ${{ steps.decide.outputs.dry_run }}
       notes: ${{ steps.decide.outputs.notes }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # HEAD^ との version 比較に加え、リリースノート生成が merge commit の
           # もう一方の親（develop 側）の履歴を辿るため全履歴が要る。
@@ -85,7 +85,7 @@ jobs:
 
           # 冪等性: releases repo に v$VER が既にあれば二重リリースしない。
           # ただし dry_run（公開しない）は既存版でもビルド検証したいので skip しない。
-          if [ "${DRY:-false}" != "true" ] && gh release view "v$VER" -R daichi8120/mojiroku-releases >/dev/null 2>&1; then
+          if [ "${DRY:-false}" != "true" ] && gh release view "v$VER" -R daichi-hotta/mojiroku-releases >/dev/null 2>&1; then
             echo "v$VER already exists on releases repo -> skip"
             CHANGED=false
           fi
@@ -106,10 +106,13 @@ jobs:
           else
             BODY=$(bash scripts/release-notes.sh "HEAD^..HEAD" || echo "（変更点の自動抽出に失敗しました）")
           fi
+          # 区切り文字は毎回ランダムにする。固定文字列だと、同じ 1 行を含むリリースノートが
+          # 本文を途中で終わらせ、後続行で version / changed などの出力を書き換えられる。
+          DELIM="NOTES_$(openssl rand -hex 16)"
           {
-            echo "notes<<RELEASE_NOTES_EOF"
+            echo "notes<<$DELIM"
             echo "$BODY"
-            echo "RELEASE_NOTES_EOF"
+            echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
 
   build-publish:
@@ -124,22 +127,21 @@ jobs:
       # shell 本文に直接補間せず env 経由で渡す
       # （public repo では Actions を叩ける範囲が広がりやすいため）。
       NOTES: ${{ needs.gate.outputs.notes }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }} # クロス repo 公開用 PAT
-      # Apple 署名 + notarization（Tauri bundler が読む。ADR-0022）
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      # 署名鍵・Apple の資格情報・公開用 PAT は job env に置かず、使う step の env にだけ渡す。
+      # job env だと第三者 action や npm / cargo のビルドスクリプトを含む全 step から読めてしまい、
+      # どれか 1 つが侵害されると正規署名つきの悪性アップデートを配れる。
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # Apple 署名 secrets を先に検証。Tauri は env 不足だと警告のみで未署名ビルドを
       # 完走してしまう（署名スキップ）ため、長い macOS ビルドの前に決定的に落とす。
       - name: Assert signing secrets present
         env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
         run: |
           set -euo pipefail
@@ -154,15 +156,18 @@ jobs:
       # ランナー上の最新安定版（=Xcode 26.x）を選ぶ。apple-metal が要求する macOS 26 SDK を満たす。
       # 厳密な再現性が要るなら固定値（例 "26.4.1"）に変える（deployment target は .cargo/config.toml で 11.0 固定済）。
       - name: Select Xcode
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
           xcode-version: latest-stable
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
-      - uses: dtolnay/rust-toolchain@stable # Rust 1.88+
-      - uses: Swatinem/rust-cache@v2
+      # SHA で固定すると ref 名から toolchain を推定できないため toolchain を明示する。
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable # Rust 1.88+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           cache-on-failure: true # publish 失敗等で job が落ちてもビルドキャッシュを保存（再ビルド短縮）
 
@@ -180,6 +185,7 @@ jobs:
       # secret はシェル本文に直接展開せず step env 経由で受ける。
       - name: Prepare App Store Connect API key
         env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
         run: |
           set -euo pipefail
@@ -193,6 +199,15 @@ jobs:
       # runtime + entitlements、sidecar 含む inside-out）→ .app を notarize+staple →
       # .dmg 署名 → .app.tar.gz 生成（staple 済み .app から）まで自動で行う。
       - name: Tauri build (signed updater artifacts)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Apple 署名 + notarization（Tauri bundler が読む。ADR-0022）
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         run: npm run tauri build
 
       - name: Stage assets (安定名へリネーム + マニフェスト生成)
@@ -214,6 +229,9 @@ jobs:
       # staple は dmg を書き換えるため、artifact upload / release create より前に行う
       # （minisign の対象は .app.tar.gz のみなので干渉しない）。
       - name: Notarize and staple dmg
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         run: |
           set -euo pipefail
           xcrun notarytool submit dist-rel/mojiroku-macos-aarch64.dmg \
@@ -227,6 +245,11 @@ jobs:
             echo "dmg notarization failed: status=$STATUS"; exit 1
           fi
           xcrun stapler staple dist-rel/mojiroku-macos-aarch64.dmg
+
+      # .p8 は notarize が済んだら消す（後続の upload-artifact などから読めないように）。
+      - name: Remove App Store Connect API key
+        if: always()
+        run: '[ -z "${APPLE_API_KEY_PATH:-}" ] || rm -f "$APPLE_API_KEY_PATH"'
 
       # 最重要: 生成署名が baked-in pubkey で検証できるか。
       # CI 署名鍵 ≠ tauri.conf.json の pubkey なら全 0.2.0 ユーザが永久にサイレント更新失敗する。
@@ -277,7 +300,7 @@ jobs:
       # 手動公開できるリカバリ用（高価な macOS ビルドを取り直さない）。
       - name: Upload built artifacts
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: mojiroku-${{ env.VERSION }}-build
           path: dist-rel/
@@ -287,13 +310,15 @@ jobs:
       # 解決し続けるため、途中で失敗してもユーザは壊れない。
       - name: Create draft release
         if: needs.gate.outputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }} # クロス repo 公開用 PAT
         run: |
           set -euo pipefail
           # 本文は複数行なので --notes ではなくファイル経由で渡す（引用崩れを避ける）。
           # 末尾にソース repo の commit を残す（配布物とソースの対応を後から辿れるように）。
-          printf '%s\n\n---\nソース: daichi8120/mojiroku@%s\n' \
+          printf '%s\n\n---\nソース: daichi-hotta/mojiroku@%s\n' \
             "$NOTES" "$GITHUB_SHA" > "$RUNNER_TEMP/release-notes.md"
-          gh release create "v$VERSION" -R daichi8120/mojiroku-releases \
+          gh release create "v$VERSION" -R daichi-hotta/mojiroku-releases \
             --draft --target main \
             --title "v$VERSION" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
@@ -304,11 +329,13 @@ jobs:
       # 3アセットが揃ったことを確認してから publish に flip（原子的切替）
       - name: Verify assets then publish
         if: needs.gate.outputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
         run: |
           set -euo pipefail
           for a in mojiroku-macos-aarch64.dmg mojiroku-macos-aarch64.app.tar.gz latest.json; do
-            gh release view "v$VERSION" -R daichi8120/mojiroku-releases --json assets \
+            gh release view "v$VERSION" -R daichi-hotta/mojiroku-releases --json assets \
               -q '.assets[].name' | grep -qx "$a" || { echo "missing asset: $a"; exit 1; }
           done
-          gh release edit "v$VERSION" -R daichi8120/mojiroku-releases --draft=false
+          gh release edit "v$VERSION" -R daichi-hotta/mojiroku-releases --draft=false
           echo "published v$VERSION"

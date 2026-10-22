@@ -2,7 +2,7 @@
 
 - Date: 2026-09-05
 - Status: Accepted
-- Related: [Issue #78](https://github.com/daichi8120/mojiroku/issues/78)
+- Related: [Issue #78](https://github.com/daichi-hotta/mojiroku/issues/78)
 
 ## Decision
 
