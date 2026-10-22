@@ -71,8 +71,9 @@ Upstream: https://crates.io/crates/whisper-rs-sys
 
 Mozilla Public License 2.0 のコンポーネント（いずれも未改変で利用）:
 
-  symphonia, symphonia-core, symphonia-bundle-mp3, symphonia-codec-aac,
-  symphonia-codec-alac, symphonia-codec-pcm, symphonia-format-isomp4,
+  symphonia, symphonia-core, symphonia-bundle-flac, symphonia-bundle-mp3,
+  symphonia-codec-aac, symphonia-codec-alac, symphonia-codec-pcm,
+  symphonia-codec-vorbis, symphonia-format-isomp4, symphonia-format-ogg,
   symphonia-format-riff, symphonia-metadata, symphonia-utils-xiph
       音声デコード。Source: https://github.com/pdeljanov/Symphonia
 
