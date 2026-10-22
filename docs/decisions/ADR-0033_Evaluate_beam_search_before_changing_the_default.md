@@ -2,8 +2,8 @@
 
 - Date: 2026-09-05
 - Status: Accepted
-- Related: [#76](https://github.com/daichi8120/mojiroku/issues/76),
-  [#77](https://github.com/daichi8120/mojiroku/issues/77)
+- Related: [#76](https://github.com/daichi-hotta/mojiroku/issues/76),
+  [#77](https://github.com/daichi-hotta/mojiroku/issues/77)
 
 ## Context
 

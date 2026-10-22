@@ -224,7 +224,7 @@ const en: Copy = {
       text: "You don't have to take any of this on trust. The full source is published, so you can check for yourself that nothing leaves your Mac.",
       label: "View the source on GitHub",
       note: "AGPL-3.0",
-      href: "https://github.com/daichi8120/mojiroku",
+      href: "https://github.com/daichi-hotta/mojiroku",
     },
   },
 
@@ -338,12 +338,12 @@ const en: Copy = {
       {
         title: "GitHub Releases",
         body: "Releases and changelog",
-        href: "https://github.com/daichi8120/mojiroku-releases/releases",
+        href: "https://github.com/daichi-hotta/mojiroku-releases/releases",
       },
       {
         title: "Source code",
         body: "Published under AGPL-3.0",
-        href: "https://github.com/daichi8120/mojiroku",
+        href: "https://github.com/daichi-hotta/mojiroku",
       },
     ],
     year: 2026,

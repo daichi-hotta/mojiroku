@@ -33,7 +33,7 @@ fi
 
 SIG="$(cat "$SIG_PATH")"            # 単一行 base64。$() が末尾改行を除去
 PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-URL="https://github.com/daichi8120/mojiroku-releases/releases/latest/download/mojiroku-macos-aarch64.app.tar.gz"
+URL="https://github.com/daichi-hotta/mojiroku-releases/releases/latest/download/mojiroku-macos-aarch64.app.tar.gz"
 
 jq -n \
   --arg v "$VERSION" \

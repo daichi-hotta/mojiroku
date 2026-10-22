@@ -2,7 +2,7 @@
 
 - Status: implemented; release validation pending
 - Date: 2026-09-06
-- Related: [#79](https://github.com/daichi8120/mojiroku/issues/79), [v0.6.0 #89](https://github.com/daichi8120/mojiroku/issues/89), ADR-0031, ADR-0032, ADR-0035
+- Related: [#79](https://github.com/daichi-hotta/mojiroku/issues/79), [v0.6.0 #89](https://github.com/daichi-hotta/mojiroku/issues/89), ADR-0031, ADR-0032, ADR-0035
 
 > Language selection is updated by [ADR-0039](ADR-0039_Restrict_automatic_recognition_to_Japanese_and_English.md): Auto and mixed windows now consider Japanese and English only.
 

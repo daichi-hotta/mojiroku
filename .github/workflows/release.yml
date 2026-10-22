@@ -8,14 +8,14 @@
 #        Apple 署名とは完全独立の検証チェーン）
 #   2. 両方の署名を fail-closed で検証（minisign 不一致なら全ユーザがサイレントに更新失敗、
 #      Apple 署名/公証漏れなら初回起動で「damaged」に戻るため、ここで決定的に落とす）
-#   3. 公開 daichi8120/mojiroku-releases に draft Release を作り、全3アセット
+#   3. 公開 daichi-hotta/mojiroku-releases に draft Release を作り、全3アセット
 #      （.dmg / .app.tar.gz / latest.json）を添付 → 揃ったら publish に flip（原子的切替）
 #   4. updater マニフェスト latest.json は Release アセット。配信は mojiroku.com Worker の
 #      /updater/latest.json プロキシが latest 解決で常時追従する（landing 再デプロイ不要）
 #
 # 前提（docs/updater-plan.md 参照）:
 #   - Secrets: TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD / RELEASES_REPO_TOKEN
-#     （RELEASES_REPO_TOKEN は daichi8120/mojiroku-releases のみに contents:write の fine-grained PAT）
+#     （RELEASES_REPO_TOKEN は daichi-hotta/mojiroku-releases のみに contents:write の fine-grained PAT）
 #   - Apple 署名 Secrets: APPLE_CERTIFICATE（Developer ID Application .p12 の base64）/
 #     APPLE_CERTIFICATE_PASSWORD / APPLE_SIGNING_IDENTITY（"Developer ID Application: ... (TEAMID)" 全文）/
 #     APPLE_API_ISSUER / APPLE_API_KEY / APPLE_API_KEY_CONTENT（App Store Connect API キー。notarytool 用）
@@ -85,7 +85,7 @@ jobs:
 
           # 冪等性: releases repo に v$VER が既にあれば二重リリースしない。
           # ただし dry_run（公開しない）は既存版でもビルド検証したいので skip しない。
-          if [ "${DRY:-false}" != "true" ] && gh release view "v$VER" -R daichi8120/mojiroku-releases >/dev/null 2>&1; then
+          if [ "${DRY:-false}" != "true" ] && gh release view "v$VER" -R daichi-hotta/mojiroku-releases >/dev/null 2>&1; then
             echo "v$VER already exists on releases repo -> skip"
             CHANGED=false
           fi
@@ -291,9 +291,9 @@ jobs:
           set -euo pipefail
           # 本文は複数行なので --notes ではなくファイル経由で渡す（引用崩れを避ける）。
           # 末尾にソース repo の commit を残す（配布物とソースの対応を後から辿れるように）。
-          printf '%s\n\n---\nソース: daichi8120/mojiroku@%s\n' \
+          printf '%s\n\n---\nソース: daichi-hotta/mojiroku@%s\n' \
             "$NOTES" "$GITHUB_SHA" > "$RUNNER_TEMP/release-notes.md"
-          gh release create "v$VERSION" -R daichi8120/mojiroku-releases \
+          gh release create "v$VERSION" -R daichi-hotta/mojiroku-releases \
             --draft --target main \
             --title "v$VERSION" \
             --notes-file "$RUNNER_TEMP/release-notes.md" \
@@ -307,8 +307,8 @@ jobs:
         run: |
           set -euo pipefail
           for a in mojiroku-macos-aarch64.dmg mojiroku-macos-aarch64.app.tar.gz latest.json; do
-            gh release view "v$VERSION" -R daichi8120/mojiroku-releases --json assets \
+            gh release view "v$VERSION" -R daichi-hotta/mojiroku-releases --json assets \
               -q '.assets[].name' | grep -qx "$a" || { echo "missing asset: $a"; exit 1; }
           done
-          gh release edit "v$VERSION" -R daichi8120/mojiroku-releases --draft=false
+          gh release edit "v$VERSION" -R daichi-hotta/mojiroku-releases --draft=false
           echo "published v$VERSION"
