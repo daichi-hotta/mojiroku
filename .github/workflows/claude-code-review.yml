@@ -12,6 +12,7 @@
 #   - If Claude returns nothing, the summary comment says so and the job fails. A broken
 #     review must not look like a clean one.
 #   - Actions are pinned to commit SHAs. On 2026-09-13 a floating @v1 broke every run.
+#   - The action runs with GITHUB_TOKEN, so the Claude GitHub App is not needed (see github_token).
 #
 # Constraints kept from the earlier setup:
 #   - Fork PRs are skipped with a job-level `if:` (a skipped job reports success, so this
@@ -40,7 +41,6 @@ jobs:
       contents: read
       pull-requests: write # the last step posts the review with GITHUB_TOKEN
       issues: write # the summary is a PR conversation comment
-      id-token: write # required by claude-code-action
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -87,6 +87,10 @@ jobs:
         uses: anthropics/claude-code-action@6b6870e649b5ff408753befeaee5fc7989d4e6a9 # v1.0.258
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The workflow's own token, not the Claude GitHub App. With the App token the action
+          # refuses to run unless this file matches the default branch, so a PR into develop
+          # fails whenever develop and main differ, and no change to this file can be tested.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: |
             You are reviewing pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
             The working tree is checked out at the PR head. Your findings are suggestions; you do not approve or block.
