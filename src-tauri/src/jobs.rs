@@ -14,9 +14,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::path::{Path, PathBuf};
 
-use mojiroku_core::store::{Job, SqliteStore};
+use mojiroku_core::store::{Job, SqliteStore, TITLE_JOB_KIND};
 use tauri::{AppHandle, Manager};
 
+use crate::commands::transcription::{cached_summary_model_path, run_local_llm, TITLE_MAX_TOKENS};
 use crate::commands::{
     acquire_heavy_job_permit, core_err, emit_job_update, heavy_job_busy, job_progress_callback,
     resolve_models_dir, resolve_recordings_dir, JobUpdate,
@@ -144,6 +145,7 @@ async fn run_one_job(app: &AppHandle, job: Job) {
         match kind.as_str() {
             "transcribe" => run_transcribe(app, &job, Arc::clone(&cancel)).await,
             "diarize" => run_diarize(app, &job, Arc::clone(&cancel)).await,
+            TITLE_JOB_KIND => run_title(app, &job).await,
             other => Err(format!("error.job.unknown_kind: {other}")),
         }
     };
@@ -307,6 +309,73 @@ async fn run_transcribe(app: &AppHandle, job: &Job, cancel: Arc<AtomicBool>) -> 
         ) {
             eprintln!("[jobs] 声紋の保存に失敗（本文は保存済み・照合のみ無効）: {e}");
         }
+    }
+    enqueue_auto_title(app, &store, job);
+    Ok(())
+}
+
+/// 文字起こしが保存された録音に、タイトル自動生成ジョブを積む（Issue #4）。
+/// 対象はマイク録音と会議で、タイトルが既定名のままのものだけ（`should_auto_title`）。
+/// **要約モデルが手元に無ければ積まない**（数 GB のダウンロードを勝手に始めない）。
+/// 自動生成は常にローカルで、クラウド設定でも文字起こしを外へ送らない。
+/// ワーカーは今のジョブが終わると次の pending を取るので、`wake()` は要らない。
+fn enqueue_auto_title(app: &AppHandle, store: &SqliteStore, job: &Job) {
+    let wanted = match store.get_recording_detail(&job.recording_id) {
+        Ok(Some(d)) => mojiroku_core::summarize::should_auto_title(&d.recording, &d.transcript),
+        _ => false,
+    };
+    let has_model = resolve_models_dir(app)
+        .and_then(|dir| cached_summary_model_path(app, &dir))
+        .is_ok_and(|p| p.is_some());
+    if !wanted || !has_model {
+        return;
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    if let Err(e) = store.enqueue_job(&id, &job.recording_id, TITLE_JOB_KIND, &job.params) {
+        eprintln!("[jobs] タイトル生成ジョブを積めなかった（録音はそのまま）: {e}");
+    }
+}
+
+/// タイトル自動生成ジョブ（Issue #4）。**失敗しても録音には何も起きない**ので、生成できなかった
+/// 場合はログだけ残して成功として終える（失敗の印を出すほどのことではない）。
+/// 生成の前後でタイトルが既定名のままか確かめ直し、利用者が付けた名前は上書きしない。
+async fn run_title(app: &AppHandle, job: &Job) -> Result<(), String> {
+    let id = &job.recording_id;
+    let transcript = {
+        let store = app.state::<SqliteStore>();
+        match store.get_recording_detail(id).map_err(|e| e.to_string())? {
+            Some(d) if mojiroku_core::summarize::should_auto_title(&d.recording, &d.transcript) => {
+                d.transcript
+            }
+            _ => return Ok(()),
+        }
+    };
+    let models_dir = resolve_models_dir(app)?;
+    let Some(model_path) = cached_summary_model_path(app, &models_dir)? else {
+        return Ok(());
+    };
+    let lang = mojiroku_core::lang::Lang::from_code(&job.params.lang);
+    let prompt = mojiroku_core::summarize::build_title_prompt(&transcript, lang);
+    let raw = match run_local_llm(app, &model_path, &prompt, lang, Some(TITLE_MAX_TOKENS)).await {
+        Ok(raw) => raw,
+        Err(e) => {
+            eprintln!("[jobs] タイトル生成に失敗（既定名のまま）: {e}");
+            return Ok(());
+        }
+    };
+    let Some(title) = mojiroku_core::summarize::sanitize_title(&raw) else {
+        eprintln!("[jobs] タイトルとして使える出力が無かった（既定名のまま）");
+        return Ok(());
+    };
+    let store = app.state::<SqliteStore>();
+    let still_default = store
+        .get_recording_detail(id)
+        .map_err(|e| e.to_string())?
+        .is_some_and(|d| mojiroku_core::summarize::is_default_title(d.recording.title.as_deref()));
+    if still_default {
+        store
+            .rename_recording(id, Some(&title))
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }

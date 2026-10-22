@@ -10,7 +10,9 @@ import {
   cancelJob,
   deleteRecording,
   diarizeRecording,
+  generateTitle,
   getRecording,
+  getSettings,
   listJobs,
   recordingAudioSrc,
   renameRecording,
@@ -32,6 +34,7 @@ import {
   formatTimestamp,
   speakerChipStyle,
   speakerName,
+  TITLE_JOB_KIND,
 } from "@/lib/types";
 import { ConfirmDialog, MenuItem, Modal, ModalHeader, Spinner, Toggle } from "@/components/ui";
 import { EmptyState, PreviewTag, TranscriptList, Waveform } from "@/components/composite";
@@ -203,6 +206,8 @@ export function DetailView({ id }: { id: string }) {
   // タイトルのインライン編集。
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleValue, setTitleValue] = useState("");
+  const [generatingTitle, setGeneratingTitle] = useState(false);
+  const [confirmCloudTitle, setConfirmCloudTitle] = useState(false);
   const [savingTitle, setSavingTitle] = useState(false);
 
   // バックグラウンドジョブ（ADR-0024）。detail.active_job を起点に job://update で追う。
@@ -292,6 +297,17 @@ export function DetailView({ id }: { id: string }) {
   // 完了/失敗トースト・サイドバー更新は App が担うので、ここは自分のビュー更新だけに徹する。
   useJobUpdate((u) => {
     if (u.recording_id !== id) return;
+    // タイトル自動生成（Issue #4）は画面の処理中表示に関わらない。付いたら名前だけ取り直す。
+    if (u.kind === TITLE_JOB_KIND) {
+      if (u.status === "done") {
+        getRecording(id)
+          .then((d) =>
+            setDetail((cur) => (cur && d ? { ...cur, recording: { ...cur.recording, title: d.recording.title } } : cur)),
+          )
+          .catch(() => {});
+      }
+      return;
+    }
     // 中断を頼んだ直後に処理が終わる・失敗することもある。どの終わり方でも「中断しています…」を外す。
     if (u.status === "done" || u.status === "failed" || u.status === "canceled") setCanceling(false);
     if (u.status === "done") {
@@ -580,6 +596,33 @@ export function DetailView({ id }: { id: string }) {
     setEditingTitle(true);
   };
 
+  // 文字起こしからタイトルを生成（Issue #4）。クラウド設定なら送信前に確認する。
+  const requestGenerateTitle = async () => {
+    if (generatingTitle) return;
+    let engine: string = "cloud";
+    try {
+      engine = (await getSettings()).engine;
+    } catch {
+      // 読めないときはクラウド扱い（確認を出す）。
+    }
+    if (engine === "cloud") setConfirmCloudTitle(true);
+    else void runGenerateTitle();
+  };
+  const runGenerateTitle = async () => {
+    setConfirmCloudTitle(false);
+    setGeneratingTitle(true);
+    try {
+      const next = await generateTitle(id);
+      setDetail((d) => (d ? { ...d, recording: { ...d.recording, title: next } } : d));
+      refreshRecents();
+      toast(t.history.titleGenerated, "success");
+    } catch (e) {
+      toast(translateError(e, t), "error");
+    } finally {
+      setGeneratingTitle(false);
+    }
+  };
+
   // タイトル保存（null/空白で既定の「無題」へ）。成功したら表示とサイドバー最近を更新。
   const saveTitle = async () => {
     if (savingTitle) return;
@@ -702,6 +745,20 @@ export function DetailView({ id }: { id: string }) {
                   >
                     <PencilIcon size={14} />
                   </button>
+                  {hasTranscript && !processing && (
+                    <button
+                      onClick={() => void requestGenerateTitle()}
+                      disabled={generatingTitle}
+                      aria-label={t.history.generateTitle}
+                      title={t.history.generateTitle}
+                      className={cx(
+                        "flex h-7 w-7 shrink-0 items-center justify-center rounded-tag text-dim transition-all hover:bg-surface-2 hover:text-body",
+                        generatingTitle ? "opacity-100" : "opacity-0 group-hover/title:opacity-100",
+                      )}
+                    >
+                      {generatingTitle ? <Spinner size={14} /> : <SparklesIcon size={14} />}
+                    </button>
+                  )}
                 </div>
               )}
               <div className="mt-0.5 font-mono text-[12px] text-faint">{meta.join(" · ")}</div>
@@ -1229,6 +1286,15 @@ export function DetailView({ id }: { id: string }) {
         confirmLabel={t.job.cancelConfirm}
         onConfirm={() => void onCancelJob()}
         onCancel={() => setConfirmCancel(false)}
+      />
+      <ConfirmDialog
+        open={confirmCloudTitle}
+        title={t.history.generateTitleCloudTitle}
+        body={t.history.generateTitleCloudBody}
+        confirmLabel={t.history.generateTitleCloudConfirm}
+        tone="primary"
+        onConfirm={() => void runGenerateTitle()}
+        onCancel={() => setConfirmCloudTitle(false)}
       />
       <ConfirmDialog
         open={confirmDel}

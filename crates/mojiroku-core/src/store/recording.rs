@@ -416,7 +416,7 @@ impl SqliteStore {
                     j.kind, j.status, j.error
              FROM recordings r
              LEFT JOIN jobs j ON j.id = (
-               SELECT id FROM jobs WHERE recording_id = r.id
+               SELECT id FROM jobs WHERE recording_id = r.id AND kind <> 'title'
                ORDER BY created_at DESC, rowid DESC LIMIT 1
              )
              ORDER BY r.created_at DESC",

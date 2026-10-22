@@ -201,14 +201,13 @@ pub(crate) async fn summarize(
     // システムプロンプトに反映）。未設定の旧 settings.json は ja。
     let lang = mojiroku_core::lang::Lang::from_code(cfg.effective_language());
     if cfg.engine == "cloud" {
-        let summary = summarize_cloud(&app, transcript, template_id, &cfg).await?;
+        let template = mojiroku_core::summarize::template_by_id(&template_id, lang);
+        let summary = summarize_cloud(&app, transcript, template, &cfg).await?;
         store
             .save_summary(&recording_id, &summary)
             .map_err(|e| e.to_string())?;
         return Ok(summary);
     }
-
-    use tauri_plugin_shell::ShellExt;
 
     let models_dir = resolve_models_dir(&app)?;
 
@@ -255,54 +254,9 @@ pub(crate) async fn summarize(
     .await
     .map_err(|e| e.to_string())??;
 
-    // 2) プロンプトを temp ファイルへ（巨大な文字起こしを引数で渡さない）
-    let prompt_file =
-        std::env::temp_dir().join(format!("mojiroku-prompt-{}.txt", std::process::id()));
-    std::fs::write(&prompt_file, &prompt).map_err(|e| e.to_string())?;
-
     emit_progress(&app, "summarize://progress", "summarize", 0, None);
-
-    // 3) sidecar 実行（externalBin。ADR-0007）。--lang でシステムプロンプト等の言語を揃える。
-    let result = app
-        .shell()
-        .sidecar("mojiroku-llm")
-        .map_err(|e| e.to_string())?
-        .args({
-            let mut args = vec![
-                model_path.to_string_lossy().to_string(),
-                prompt_file.to_string_lossy().to_string(),
-                "--lang".to_string(),
-                lang.code().to_string(),
-            ];
-            // 思考モデル（Qwen3 系）には `--no-think` が要る。渡さないと**英語の
-            // `<think>` ブロックがそのまま stdout に出て**、利用者には議事録の代わりに
-            // 思考トレースが見える（2026-08-30 に実測）。
-            //
-            // 無条件に渡してはいけない。このフラグはプロンプトに `<think></think>` を
-            // 足すので、思考しないモデルでは出力が変わる（Qwen2.5 で文言が変化した）。
-            // 渡すかどうかはモデルの属性（`SummaryModel::thinking`）が決める。
-            if mojiroku_core::models::needs_no_think(
-                &model_path.file_name().unwrap_or_default().to_string_lossy(),
-            ) {
-                args.push("--no-think".to_string());
-            }
-            args
-        })
-        .output()
-        .await
-        .map_err(|e| e.to_string());
-
-    let _ = std::fs::remove_file(&prompt_file);
-    let output = result?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "error.summarize.sidecar_failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let content =
-        mojiroku_core::summarize::tidy_local_output(&String::from_utf8_lossy(&output.stdout));
+    let stdout = run_local_llm(&app, &model_path, &prompt, lang, None).await?;
+    let content = mojiroku_core::summarize::tidy_local_output(&stdout);
     let summary = mojiroku_core::Summary {
         template_id,
         content,
@@ -316,17 +270,128 @@ pub(crate) async fn summarize(
     Ok(summary)
 }
 
+/// タイトル生成で sidecar に許す最大トークン数。プロンプトの調整（Issue #4）はこの値で測った。
+pub(crate) const TITLE_MAX_TOKENS: u32 = 48;
+
+/// 手元にある要約モデルのパス（設定の選択を尊重し、ダウンロードはしない）。無ければ `None`。
+pub(crate) fn cached_summary_model_path(
+    app: &AppHandle,
+    models_dir: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let cfg = load_settings(app)?;
+    Ok(mojiroku_core::models::cached_summary_model(
+        cfg.requested_local_summary_model(),
+        mojiroku_core::hardware::total_memory_bytes(),
+        models_dir,
+    )
+    .map(|m| models_dir.join(m.file)))
+}
+
+/// 詳細画面の「タイトルを生成」（Issue #4）。利用者の明示の操作なので、要約と同じエンジン設定に
+/// 従う（クラウド設定ならクラウドへ送る）。ローカルは手元の要約モデルを使い、無ければダウンロードを
+/// 始めずにエラーを返す。成功したら保存して新しいタイトルを返す。
+///
+/// 自動生成（`jobs.rs` の title ジョブ）とは違い、既定名以外のタイトルも置き換える。
+#[tauri::command]
+pub(crate) async fn generate_title(
+    app: AppHandle,
+    store: State<'_, SqliteStore>,
+    recording_id: String,
+) -> Result<String, String> {
+    let cfg = load_settings(&app)?;
+    let lang = mojiroku_core::lang::Lang::from_code(cfg.effective_language());
+    let transcript = store
+        .get_recording_detail(&recording_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "error.recording.not_found".to_string())?
+        .transcript;
+    if transcript.segments.is_empty() {
+        return Err("error.job.no_transcript".to_string());
+    }
+
+    let raw = if cfg.engine == "cloud" {
+        let template = mojiroku_core::summarize::title_template(lang);
+        summarize_cloud(&app, transcript, template, &cfg).await?.content
+    } else {
+        let models_dir = resolve_models_dir(&app)?;
+        let model_path = cached_summary_model_path(&app, &models_dir)?
+            .ok_or_else(|| "error.title.model_missing".to_string())?;
+        let _heavy_permit = acquire_heavy_job(&app, "title://progress").await;
+        let prompt = mojiroku_core::summarize::build_title_prompt(&transcript, lang);
+        run_local_llm(&app, &model_path, &prompt, lang, Some(TITLE_MAX_TOKENS)).await?
+    };
+
+    let title = mojiroku_core::summarize::sanitize_title(&raw)
+        .ok_or_else(|| "error.title.not_generated".to_string())?;
+    store
+        .rename_recording(&recording_id, Some(&title))
+        .map_err(|e| e.to_string())?;
+    Ok(title)
+}
+
+/// ローカル要約 sidecar（`mojiroku-llm`, ADR-0007）を 1 回実行して標準出力を返す。要約とタイトル生成で共通。
+/// 呼び出し側が重い処理の許可（HEAVY_ML_JOB）を持っていること。`max_tokens` を省くと sidecar の既定。
+pub(crate) async fn run_local_llm(
+    app: &AppHandle,
+    model_path: &std::path::Path,
+    prompt: &str,
+    lang: mojiroku_core::lang::Lang,
+    max_tokens: Option<u32>,
+) -> Result<String, String> {
+    use tauri_plugin_shell::ShellExt;
+
+    // プロンプトは temp ファイルで渡す（巨大な文字起こしを引数で渡さない）。呼び出しごとに別名。
+    let prompt_file = std::env::temp_dir().join(format!("mojiroku-prompt-{}.txt", uuid::Uuid::new_v4()));
+    std::fs::write(&prompt_file, prompt).map_err(|e| e.to_string())?;
+
+    let mut args = vec![
+        model_path.to_string_lossy().to_string(),
+        prompt_file.to_string_lossy().to_string(),
+    ];
+    if let Some(n) = max_tokens {
+        args.push(n.to_string());
+    }
+    args.push("--lang".to_string());
+    args.push(lang.code().to_string());
+    // 思考モデル（Qwen3 系）には `--no-think` が要る。渡さないと**英語の
+    // `<think>` ブロックがそのまま stdout に出て**、利用者には議事録の代わりに
+    // 思考トレースが見える（2026-08-30 に実測）。
+    //
+    // 無条件に渡してはいけない。このフラグはプロンプトに `<think></think>` を
+    // 足すので、思考しないモデルでは出力が変わる（Qwen2.5 で文言が変化した）。
+    // 渡すかどうかはモデルの属性（`SummaryModel::thinking`）が決める。
+    if mojiroku_core::models::needs_no_think(&model_path.file_name().unwrap_or_default().to_string_lossy()) {
+        args.push("--no-think".to_string());
+    }
+
+    let result = app
+        .shell()
+        .sidecar("mojiroku-llm")
+        .map_err(|e| e.to_string())?
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| e.to_string());
+    let _ = std::fs::remove_file(&prompt_file);
+    let output = result?;
+    if !output.status.success() {
+        return Err(format!(
+            "error.summarize.sidecar_failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 /// クラウド（BYOK）要約。鍵はキーチェーンから Rust 内で直接取得し、webview へ往復させない。
 /// ⚠️ BYOK 利用時はデータが端末外（各プロバイダ）へ送信される（プライバシーのトレードオフ）。
 async fn summarize_cloud(
     app: &AppHandle,
     transcript: mojiroku_core::Transcript,
-    template_id: String,
+    template: mojiroku_core::SummaryTemplate,
     cfg: &settings::Settings,
 ) -> Result<mojiroku_core::Summary, String> {
-    use mojiroku_core::summarize::{
-        template_by_id, AnthropicSummarizer, OpenAiSummarizer, SummarizeProvider,
-    };
+    use mojiroku_core::summarize::{AnthropicSummarizer, OpenAiSummarizer, SummarizeProvider};
 
     let model = cfg.effective_model(); // 空文字を API に送らない（既定へ解決済み）
     let provider = cfg.provider.clone();
@@ -340,7 +405,6 @@ async fn summarize_cloud(
     // tokio ワーカーをブロックしないよう spawn_blocking で一括して回す。
     tauri::async_runtime::spawn_blocking(move || -> Result<mojiroku_core::Summary, String> {
         let api_key = get_secret_or_error(&key_name, "error.summarize.api_key_missing")?;
-        let template = template_by_id(&template_id, lang);
         let result = match provider.as_str() {
             "openai" => OpenAiSummarizer {
                 api_key,

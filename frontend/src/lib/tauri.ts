@@ -131,6 +131,10 @@ export const listJobs = () => invoke<Job[]>("list_jobs");
 export const cancelJob = (jobId: string) => invoke<boolean>("cancel_job", { jobId });
 
 /** 録音タイトル変更（null/空白で既定の「無題」へ戻す）。全文検索も同期される。 */
+/** 文字起こしからタイトルを生成して保存する（Issue #4）。要約と同じエンジン設定に従う。 */
+export const generateTitle = (recordingId: string) =>
+  invoke<string>("generate_title", { recordingId });
+
 export const renameRecording = (id: string, title: string | null) =>
   invoke<void>("rename_recording", { id, title: title?.trim() || null });
 

@@ -120,6 +120,12 @@ const ja = {
     deleted: "削除しました",
     renamed: "タイトルを変更しました",
     renameTitle: "タイトルを変更",
+    generateTitle: "文字起こしからタイトルを生成",
+    titleGenerated: "タイトルを生成しました",
+    generateTitleCloudTitle: "クラウドでタイトルを生成しますか？",
+    generateTitleCloudBody:
+      "要約エンジンがクラウドに設定されているため、文字起こしをクラウドの AI に送ってタイトルを作ります。",
+    generateTitleCloudConfirm: "送信して生成",
     deleteConfirmTitle: "録音を削除しますか？",
     deleteConfirmBody: (title: string) =>
       `『${title}』と、その文字起こし・要約をすべて削除します。元に戻せません。`,
@@ -699,6 +705,9 @@ const ja = {
     "error.system_audio.no_display": "ディスプレイが見つかりません",
     "error.summarize.api_key_missing": "クラウド要約には API キーが必要です（設定 → 要約エンジン）",
     "error.summarize.sidecar_failed": "ローカル要約の実行に失敗しました",
+    "error.title.not_generated": "タイトルを作れませんでした。もう一度試すか、手で入力してください",
+    "error.title.model_missing":
+      "要約モデルがまだありません。先に要約を一度作ると、タイトルも生成できるようになります",
     "error.model.download": "モデルのダウンロードに失敗しました（ネットワーク接続を確認してください）",
     // 証明書の検証失敗。回線ではなく、通信を検査する中間装置が原因のことが多い（Issue #31）。
     "error.model.download_tls":

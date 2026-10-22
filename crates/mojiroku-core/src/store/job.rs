@@ -36,12 +36,17 @@ const SELECT_COLS: &str =
 /// `active_job_for_recording` の実体（`&Connection` を受ける版）。呼び出し側が既に conn を
 /// 保持している場合に使う — `get_recording_detail` は自分の conn を渡すことで、`self.conn()` の
 /// 再ロック（std Mutex は再入不可＝デッドロック）を避ける。pub(super) で store モジュール内に限定公開。
+/// 文字起こし後にタイトルを自動で付けるジョブ（Issue #4）。裏方の処理なので、録音の状態
+/// （一覧の処理中・失敗の印、詳細画面の処理中表示）には数えない。
+pub const TITLE_JOB_KIND: &str = "title";
+
 pub(super) fn active_job_row(conn: &Connection, recording_id: &str) -> Result<Option<Job>> {
     let job = conn
         .query_row(
             &format!(
                 "SELECT {SELECT_COLS} FROM jobs
                  WHERE recording_id = ?1 AND status IN ('pending', 'running')
+                   AND kind <> '{TITLE_JOB_KIND}'
                  ORDER BY updated_at DESC, id ASC LIMIT 1"
             ),
             params![recording_id],
@@ -301,6 +306,9 @@ mod tests {
         // 完了すると active（pending|running）ではなくなる。
         s.set_job_running("j1").unwrap();
         s.set_job_done("j1").unwrap();
+        assert!(s.get_recording_detail("r1").unwrap().unwrap().active_job.is_none());
+        // タイトル生成（Issue #4）は詳細を「処理中」にしない。
+        s.enqueue_job("j2", "r1", TITLE_JOB_KIND, &params()).unwrap();
         assert!(s.get_recording_detail("r1").unwrap().unwrap().active_job.is_none());
     }
 

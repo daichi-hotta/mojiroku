@@ -386,6 +386,7 @@ export function ConfirmDialog({
   confirmLabel,
   cancelLabel,
   busy = false,
+  tone = "danger",
   onConfirm,
   onCancel,
 }: {
@@ -395,6 +396,8 @@ export function ConfirmDialog({
   confirmLabel?: string;
   cancelLabel?: string;
   busy?: boolean;
+  /** 確定ボタンの色。取り消せない操作は danger（既定）、それ以外は primary。 */
+  tone?: "danger" | "primary";
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -415,7 +418,8 @@ export function ConfirmDialog({
             onClick={onConfirm}
             disabled={busy}
             className={cx(
-              "inline-flex h-8 items-center justify-center gap-1.5 rounded-btn bg-danger px-3.5 text-[13px] font-semibold text-white",
+              "inline-flex h-8 items-center justify-center gap-1.5 rounded-btn px-3.5 text-[13px] font-semibold text-white",
+              tone === "danger" ? "bg-danger" : "bg-brand",
               "transition-[filter] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60",
             )}
           >
