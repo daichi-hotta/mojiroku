@@ -238,11 +238,19 @@ fn parse_events(text: &str) -> Vec<RawEvent> {
             None => continue, // VEVENT 外（VTIMEZONE 等）は無視
         };
         // VEVENT 内のサブコンポーネント（BEGIN:VALARM … END:VALARM 等）はプロパティを拾わない。
-        if trimmed.len() >= 6 && trimmed[..6].eq_ignore_ascii_case("BEGIN:") {
+        // バイト列で比べる（`&str` を固定長で切ると、境界が多バイト文字の途中に来たとき panic する）。
+        let bytes = trimmed.as_bytes();
+        if bytes
+            .get(..6)
+            .is_some_and(|b| b.eq_ignore_ascii_case(b"BEGIN:"))
+        {
             sub_depth += 1;
             continue;
         }
-        if trimmed.len() >= 4 && trimmed[..4].eq_ignore_ascii_case("END:") {
+        if bytes
+            .get(..4)
+            .is_some_and(|b| b.eq_ignore_ascii_case(b"END:"))
+        {
             sub_depth = sub_depth.saturating_sub(1);
             continue;
         }
@@ -647,5 +655,17 @@ mod tests {
         assert_eq!(ev.len(), 1);
         assert_eq!(ev[0].title, "本物の会議");
         assert_eq!(ev[0].location.as_deref(), Some("本物の場所"));
+    }
+
+    #[test]
+    fn non_ascii_lines_do_not_panic() {
+        // `UID:日本語` は 4・6 バイト目が「日」の途中に来る。BEGIN:/END: の判定で panic しないこと。
+        let ics = wrap(
+            "BEGIN:VEVENT\r\nUID:日本語の予定\r\nSUMMARY:定例\r\nDTSTART;TZID=Asia/Tokyo:20260116T100000\r\nEND:VEVENT",
+        );
+        let ev = parse_and_expand(&ics, jst(2026, 1, 15, 0, 0), 14, 20);
+        assert_eq!(ev.len(), 1);
+        assert_eq!(ev[0].title, "定例");
+        assert!(ev[0].id.starts_with("日本語の予定#"));
     }
 }
