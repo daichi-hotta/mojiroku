@@ -11,7 +11,10 @@
 #     denials and still reported "No issues found". The summary now counts blocked tool calls
 #     and warns when there are any; the run log lists each one.
 #   - Claude reports fixed findings by the ids in context.md. The last step marks those comments,
-#     and later runs leave them out, so a fix is announced once.
+#     and later runs leave them out, so a fix is announced once. An outdated finding that Claude
+#     reports again is closed the same way, so the copies do not pile up.
+#   - The prompt lists the allowed tools. Blocked calls came from reviews of this file that tried
+#     to read the upstream action through the web or shell pipelines (2026-10-22, ops#61).
 #   - Changed files are split across parallel subagents that read them in full, and the main
 #     agent verifies their candidates. A single agent stopped after a few partial reads and
 #     missed most of the findings Codex had made on the same diffs.
@@ -151,9 +154,15 @@ jobs:
             3. Launch one Task subagent per group, all in the same message, each with run_in_background set to false so its result comes back to you. Give each one the repository, BASE and HEAD, its file list, the PR title and description, the review questions below, and these instructions:
                - Read each of your files in full at HEAD with the Read tool, without offset or limit, and read `git diff BASE...HEAD -- <your files>`.
                - Follow calls out of your files into the rest of the repository where needed.
+               - Use only the tools in the Tools section below.
                - Return every candidate problem with path, line, the input or sequence of events, and the code path that produces the wrong result. Do not filter by confidence; the reviewer verifies.
             4. While they run, read the repository's AGENTS.md or CLAUDE.md (root and the directories of changed files) and note the rules that apply to the changed files.
             5. Wait until every subagent has returned. Then verify each returned candidate by reading the code yourself. Keep it when you can name the input or sequence of events and the code path that produces the wrong result; you do not need to run it. Drop the rest, and merge candidates that share one root cause.
+
+            Tools (give these rules to every subagent)
+            - Only Task, Read, Grep, Glob and these commands are allowed: git diff, git log, git show, git blame, gh pr view, gh pr diff. Any other call is blocked and counted against the review.
+            - Run each command on its own, without pipes, redirects, `cd`, `&&` or `;`. Use Grep and Read instead of grep, sed, awk, head or cut.
+            - There is no web access and no access outside the repository. When a claim depends on code you cannot read, such as a third-party action, say so instead of guessing.
 
             Review questions (give these to every subagent)
             - Purpose: what is this change for, according to the PR title, the description and AGENTS.md? Can it report success or look correct while that purpose is not met?
@@ -174,12 +183,13 @@ jobs:
             - Do not report: style or naming preferences, missing comments, anything a linter or compiler would catch, or problems that existed before this PR unless the PR makes them worse.
 
             Earlier findings
-            - Do not repeat a finding listed in context.md, unless it is marked (outdated) and the problem is still in the new code.
+            - Do not repeat a finding listed in context.md, unless it is marked (outdated) and the problem is still in the new code. When you report such a finding again, set its replaces field to the earlier id.
             - If the new code fixes one, put its id into resolved_prior: the bracketed text at the start of its line in context.md, such as c1234567890 or u1a2b3c4d.
 
             Output
             - path is relative to the repository root. line is the line number in the head version, confirmed with Read. Pick a line inside the diff (an added line or a nearby context line). Use start_line for a multi-line range.
             - title: one short sentence naming the problem.
+            - replaces: only for a finding you report again (see Earlier findings), the id of the earlier one.
             - body: what goes wrong (a concrete input or sequence), why, and how to fix it. Three to six sentences. Quote the rule when citing AGENTS.md or CLAUDE.md.
             - summary: two to four sentences on what you checked and where you looked hardest. Write it even when there are no findings.
             - Write titles, bodies and the summary in the language this repository's AGENTS.md or CLAUDE.md prescribes for PR reviews; use English if it says nothing.
@@ -189,7 +199,7 @@ jobs:
           claude_args: |
             --model claude-opus-5-5
             --allowedTools "Task,Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(gh pr view:*),Bash(gh pr diff:*)"
-            --json-schema '{"type":"object","additionalProperties":false,"required":["summary","findings","resolved_prior"],"properties":{"summary":{"type":"string"},"resolved_prior":{"type":"array","items":{"type":"string"}},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["severity","path","line","title","body"],"properties":{"severity":{"type":"string","enum":["P0","P1","P2"]},"path":{"type":"string"},"line":{"type":"integer","minimum":1},"start_line":{"type":"integer","minimum":1},"title":{"type":"string"},"body":{"type":"string"}}}}}}'
+            --json-schema '{"type":"object","additionalProperties":false,"required":["summary","findings","resolved_prior"],"properties":{"summary":{"type":"string"},"resolved_prior":{"type":"array","items":{"type":"string"}},"findings":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["severity","path","line","title","body"],"properties":{"severity":{"type":"string","enum":["P0","P1","P2"]},"path":{"type":"string"},"line":{"type":"integer","minimum":1},"start_line":{"type":"integer","minimum":1},"title":{"type":"string"},"body":{"type":"string"},"replaces":{"type":"string"}}}}}}'
 
       - name: Post the review
         if: ${{ !cancelled() && steps.context.outputs.stale != 'true' }}
@@ -208,6 +218,8 @@ jobs:
             const BOT = 'github-actions[bot]';
             const SUMMARY = '<!-- claude-review:summary -->';
             const FINDING = '<!-- claude-review:finding -->';
+            // Later runs leave out a finding with this marker: `${RESOLVED} <sha> -->` when Claude found it
+            // fixed, `${RESOLVED} superseded <sha> -->` when Claude reported it again in a newer comment.
             const RESOLVED = '<!-- claude-review:resolved';
             const ICON = { P0: '🔴', P1: '🟠', P2: '🟡' };
             const RANK = { P0: 0, P1: 1, P2: 2 };
@@ -358,21 +370,26 @@ jobs:
             // no longer carried. Earlier findings stay listed until Claude reports them fixed.
             const ids = new Set();
             for (const r of review.resolved_prior || []) {
-              const m = String(r).match(/\b[cu][0-9a-f]{8,}\b/);
-              if (m) ids.add(m[0]);
-              else core.warning(`resolved_prior entry without an id: ${String(r).slice(0, 200)}`);
+              const found = String(r).match(/\b[cu][0-9a-f]{8,}\b/g) || [];
+              if (!found.length) core.warning(`resolved_prior entry without an id: ${String(r).slice(0, 200)}`);
+              for (const id of found) ids.add(id);
             }
-            const fixed = [];
+            const fixedLine = (c) => `- \`${c.path}${c.line ? `:${c.line}` : ''}\`: ${c.body.split('\n')[0].replace(/\*\*/g, '')}`;
+            // A re-run of this commit no longer sees the findings an earlier run marked, so keep listing them.
+            const fixed = reviewComments
+              .filter((c) => c.user && c.user.login === BOT && c.body.includes(`${RESOLVED} ${sha} -->`))
+              .map(fixedLine);
             for (const id of ids) {
               const c = open.get(id);
               const f = earlier.find((e) => unplacedId(e) === id);
               if (c) {
-                fixed.push(`- \`${c.path}${c.line ? `:${c.line}` : ''}\`: ${c.body.split('\n')[0].replace(/\*\*/g, '')}`);
+                // Listed only once marked; an unmarked one returns in the next context and is reported then.
                 try {
                   await github.rest.pulls.updateReviewComment({
                     owner, repo, comment_id: c.id,
                     body: `${c.body}\n\n✅ Fixed in \`${short}\`, according to the Claude review.\n${RESOLVED} ${sha} -->`,
                   });
+                  fixed.push(fixedLine(c));
                 } catch (e) {
                   core.warning(`Could not mark comment ${c.id} as fixed: ${e.message}`);
                 }
@@ -382,7 +399,24 @@ jobs:
                 core.warning(`resolved_prior names no open finding: ${id}`);
               }
             }
-            const carried = earlier.filter((f) => !ids.has(unplacedId(f)));
+            // An outdated finding that Claude reported again is closed, so the two do not pile up.
+            const replaced = new Set();
+            for (const f of findings) {
+              const m = String(f.replaces || '').match(/\b[cu][0-9a-f]{8,}\b/);
+              if (!m || ids.has(m[0])) continue;
+              replaced.add(m[0]);
+              const c = open.get(m[0]);
+              if (!c) continue;
+              try {
+                await github.rest.pulls.updateReviewComment({
+                  owner, repo, comment_id: c.id,
+                  body: `${c.body}\n\n↪️ Reported again on \`${short}\` in a newer comment.\n${RESOLVED} superseded ${sha} -->`,
+                });
+              } catch (e) {
+                core.warning(`Could not close comment ${c.id} as reported again: ${e.message}`);
+              }
+            }
+            const carried = earlier.filter((f) => !ids.has(unplacedId(f)) && !replaced.has(unplacedId(f)));
             const summaryOnly = [...unplaced, ...carried];
 
             const n = (s) => findings.filter((f) => f.severity === s).length;
