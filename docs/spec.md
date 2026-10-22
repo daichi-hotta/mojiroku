@@ -130,7 +130,8 @@ SummaryTemplate      { id, name, prompt, kind(minutes|summary|action_items) }
 `idx` は `insert_segments` が `enumerate()` で採番した連番で、`Segment.idx` として API 境界に出る。
 
 **戻り値は「実際に変えたか」**（`Result<bool>` → コマンド → `invoke<boolean>`）。
-同じ話者を選び直したときは `false` を返して何もしない。UI はこれを見て「要約が古い」の表示を
+同じ話者を選び直したときは `false` を返し、発言も要約も変えない（下の「手で確かめた発言」の
+行だけは消す）。UI はこれを見て「要約が古い」の表示を
 出し分ける — 真偽を知っているのはコアだけなので、**UI 側で現在値と比較させない**
 （UI の値が DB と一致している前提に依存してしまう）。
 
@@ -152,27 +153,37 @@ SummaryTemplate      { id, name, prompt, kind(minutes|summary|action_items) }
   フロントの `translateError`（最初の `": "` でキーを切り出す）に掛からず、
   日本語 UI に英語がそのまま出る。
 
-#### ⚠️ 再話者分離すると訂正は消える
+#### 訂正の記録と、話者分離のやり直し（ADR-0048）
 
-`replace_speaker_assignments` は `segments` を**全削除して再挿入**する（ADR-0024）。
-訂正した `speaker_id` は残らない。
+訂正は `segments.speaker_id` の更新と同時に `speaker_corrections` へ 1 発言 1 行で残す
+（スキーマ v8）。
 
-いま事故が起きないのは **UI が塞いでいるからだけ**である。
+| 列 | 中身 |
+|---|---|
+| `predicted` | 話者分離が付けた話者。同じ発言を何度直しても最初の値を残す |
+| `corrected` | 利用者が選んだ話者（`NULL` は話者不明に戻した） |
 
-```ts
-// frontend/src/features/detail/DetailView.tsx
-const canDiarize =
-  !processing && hasTranscript && speakers.length === 0 && rec.source_type !== "live";
-```
+`predicted` と同じ話者を選び直すと行を消す（訂正の取り消し）。文字起こしを入れ直すと
+`idx` が別の発言を指しうるので、`replace_transcript` が全行を消す。
 
-`speakers.length === 0` の条件により、話者が付いている録音では再分離ボタンが出ない。
-**バックエンド（`diarize_recording`）が拒否するのは Live のみ**で、「既に話者付き」は拒否していない
-（エラーキー名が `already_diarized` だが、実際に弾いているのは Live）。
+**話者分離をやり直しても訂正は引き継ぐ。** 本文は変わらないので `idx` はそのまま使える。
+変わるのは話者 id だけなので、選んだ話者 X の新しい id を次の順で決める
+（`correction::carry_corrections`）。
 
-**`canDiarize` の条件を緩めるときは、訂正の引き継ぎ方を先に決めること。**
-改名は `carry_display_names` が声紋 cosine でベスト努力の引き継ぎをするが、訂正は
-「この発言はこの人」という分離結果そのものへの否定なので、より強い主張である。
-引き継ぎに失敗したときに黙って捨ててよいものではない。
+1. X の**直していない**発言が、やり直しで付いた話者の多数決（直した発言は票に入れない。同数なら id の小さい方）
+2. 1 で決まらなければ、改名の引き継ぎと同じ声紋の対応（`match_speaker_ids`）
+3. 会議の自分（`self`）は再分離しないので、そのまま
+
+どれでも決まらない発言と、選んだ話者と元の予測（利用者が否定した話者）が同じ新しい話者に
+まとまった発言は**未割当（「?」）に戻し**、件数をジョブ完了の通知
+（`JobUpdate.unmapped_corrections`）で画面に出す。利用者が一度否定した話者分離の結果に
+黙って戻さないためである。残った行は新しい id で書き直し、`predicted` はやり直しの結果になる。
+やり直しの結果が利用者の選択と一致した行も消さない（手で確かめた発言として残す。
+取り消しで行を消すのは、利用者が自分で `predicted` を選び直したときだけ）。手で確かめた発言では
+`predicted` が今の話者なので、今の話者を選び直すと行だけが消える（発言と要約は変えない）。
+否定した話者が無いので、次のやり直しで「否定した話者とまとまった」として未割当にもしない。
+
+`segments` を書き換える経路を新しく足すときは、`speaker_corrections` をどうするかを決めること。
 
 ## 10. モデル管理
 

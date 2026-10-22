@@ -142,6 +142,7 @@ impl SqliteStore {
             params![recording_id],
         )?;
         insert_segments(&tx, recording_id, transcript)?;
+        correction::clear(&tx, recording_id)?;
         replace_speakers_rows(&tx, recording_id, speakers)?;
         let duration_ms = transcript.segments.last().map(|s| s.end_ms).unwrap_or(0) as i64;
         tx.execute(
@@ -181,7 +182,8 @@ impl SqliteStore {
     /// 既存要約は stale にする（要約本文に話者名が出るため）。
     /// 本文は変わらないので `rec_fts` は触らない。
     ///
-    /// **戻り値は「実際に変えたか」。** 同じ話者を選び直したときは `false` を返して何もしない。
+    /// **戻り値は「実際に変えたか」。** 同じ話者を選び直したときは `false` を返し、発言も要約も
+    /// 変えない（やり直しで選択と一致した訂正の行だけは消す・ADR-0048）。
     /// 呼び出し側（UI）はこれを見て「要約が古い」の表示を出し分ける — 真偽を知っているのは
     /// ここだけなので、UI 側で現在値と比較させない（UI の値が DB と一致している前提に依存してしまう）。
     pub fn set_segment_speaker(
@@ -220,9 +222,13 @@ impl SqliteStore {
             .optional()?
             .ok_or_else(|| crate::error::CoreError::Db("error.segment.not_found".to_string()))?;
 
-        // 同じ話者を選び直しただけなら何もしない。要約を stale にすると 7B モデルでの
+        // 同じ話者を選び直しただけなら発言も要約も変えない。要約を stale にすると 7B モデルでの
         // 作り直しが分単位で走るため、内容が変わっていないのに促すのは害。
+        // ただし、やり直しの結果が選択と一致して残った行は predicted = 今の話者なので、
+        // 取り消し（predicted を選び直す）はこの経路に来る。その行だけ消す（ADR-0048）。
         if current.as_deref() == speaker_id {
+            correction::forget_confirmed(&tx, recording_id, idx, speaker_id)?;
+            tx.commit()?;
             return Ok(false);
         }
 
@@ -230,6 +236,8 @@ impl SqliteStore {
             "UPDATE segments SET speaker_id = ?3 WHERE recording_id = ?1 AND idx = ?2",
             params![recording_id, idx, speaker_id],
         )?;
+        // 話者分離をやり直しても引き継げるよう、直したことを残す（ADR-0048）。
+        correction::record(&tx, recording_id, idx, current.as_deref(), speaker_id)?;
 
         tx.execute(
             "UPDATE summaries SET stale = 1 WHERE recording_id = ?1",
@@ -243,6 +251,8 @@ impl SqliteStore {
     /// `transcript` は既存本文に新 diarization を `merge::assign_speakers` した後のもの（text 不変・
     /// speaker_id のみ変化）。`remap` は新 speaker_id → 引き継ぐ display_name（声紋 cosine で新旧一致した改名）。
     /// speaker_matches（ライブラリ照合）は再計算対象なので消し、既存要約は stale マークする。
+    /// `corrections` は `correction::carry_corrections` で新しい id に書き直した手動訂正
+    /// （`transcript` には反映済み）。引き継げなかった訂正の行は消える。
     #[allow(clippy::too_many_arguments)]
     pub fn replace_speaker_assignments(
         &self,
@@ -252,6 +262,7 @@ impl SqliteStore {
         embeddings: &[crate::diarization::SpeakerEmbedding],
         model: &str,
         remap: &[(String, Option<String>)],
+        corrections: &[crate::correction::SpeakerCorrection],
     ) -> Result<()> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
@@ -261,6 +272,8 @@ impl SqliteStore {
             params![recording_id],
         )?;
         insert_segments(&tx, recording_id, transcript)?;
+        // 手で直した発言は `transcript` に反映済み。記録を新しい話者 id に揃える（ADR-0048）。
+        correction::replace_after_rediarize(&tx, recording_id, corrections)?;
         // 2) speakers を差し替え、remap の display_name を反映（引き継ぎ）。
         let remap_name = |id: &str| -> Option<String> {
             remap

@@ -11,6 +11,7 @@ pub mod schemas;
 pub mod audio;
 pub mod calendar;
 pub mod cancel;
+pub mod correction;
 pub mod diarization;
 pub mod export;
 pub mod ffi_guard;

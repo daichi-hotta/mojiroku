@@ -65,6 +65,10 @@ repo は「全部の家」ではない。
   Speaker separation can be re-run on any transcribed recording (Issue #102). For meetings
   only the system track is re-diarized with the saved start offset; `self` segments are
   never reassigned (`merge::reassign_meeting_speakers`).
+  Hand corrections are stored in `speaker_corrections` (schema v8) and carried over a
+  re-run by majority vote of the chosen speaker's uncorrected lines, then voiceprint match;
+  unmappable ones become unassigned and are reported (ADR-0048). Any new path that rewrites
+  `segments` must decide what happens to that table.
 - Live translation is an opt-in meeting feature (ADR-0037, updated by ADR-0038), using the separate
   `mojiroku-llm --translate` path with Qwen3.5-9B and `--no-think`. It requires at least 16 GiB
   of detected RAM and its own 5.68 GB cache file; downloading it must not change summary
@@ -87,7 +91,7 @@ repo は「全部の家」ではない。
 ```
 frontend/                Vite+React UI（features/transcription, summary, history, recording, lib/, stores/）
 src-tauri/               Tauri v2 シェル。commands（health/transcribe_file/summarize/録音/履歴）、capabilities/、binaries/(gitignore)
-crates/mojiroku-core/    ML コア。audio/ stt/ summarize/(byok) diarization/ vad/ store/(SQLite) models/ pipeline/ merge.rs schemas.rs
+crates/mojiroku-core/    ML コア。audio/ stt/ summarize/(byok) diarization/ vad/ store/(SQLite) models/ pipeline/ merge.rs correction.rs schemas.rs
 crates/mojiroku-llm/     ローカル要約 sidecar（llama.cpp）。stdin=プロンプトファイル, stdout=要約
 crates/mojiroku-mcp/     ローカル MCP サーバ（rmcp stdio）。履歴 DB を read-only 公開。MCP クライアントが spawn; bundled as externalBin since 2026-09-03
 eval/diarization/        話者分離の品質ゲート用ハーネス（GT + 再現スクリプト。音声・モデルは含まない。ADR-0028）
