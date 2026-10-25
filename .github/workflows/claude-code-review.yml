@@ -15,6 +15,8 @@
 #     reports again is closed the same way, so the copies do not pile up.
 #   - The prompt lists the allowed tools. Blocked calls came from reviews of this file that tried
 #     to read the upstream action through the web or shell pipelines (2026-10-22, ops#61).
+#   - Severity comes from the trigger and the harm, not from the kind of problem. While the
+#     rubric gave races and cancellation as P2 examples, 40-plus findings had no P1 (2026-10-25).
 #   - Changed files are split across parallel subagents that read them in full, and the main
 #     agent verifies their candidates. A single agent stopped after a few partial reads and
 #     missed most of the findings Codex had made on the same diffs.
@@ -175,10 +177,14 @@ jobs:
             - Rules: does the change break a rule in AGENTS.md or CLAUDE.md that applies to the file?
 
             What to report
-            - P0: data loss, a security hole, or the product cannot start or release.
-            - P1: ordinary use breaks or gives wrong results; should be fixed before merge.
-            - P2: wrong behavior under a specific but realistic condition (a race, cancellation, an edge input, a platform difference), or a clear violation of a quoted AGENTS.md or CLAUDE.md rule.
-            - Report a conditional bug as P2 when the condition can realistically occur. Do not drop it because it depends on inputs or state.
+            - Set the severity from the trigger and the harm. The category of a problem does not set its severity.
+            - The trigger is normal use when it is an action the product offers, an input or output the feature is meant to handle, or a routine run, however rarely it happens. It is uncommon only when it needs a coincidence of timing or state that the user does not control, or an environment the project does not target.
+            - P0: data loss, a security hole, or the product cannot start or release, whatever the trigger.
+            - P1: should be fixed before merge. A normal-use trigger leads to a result that is wrong, lost, or overrides what the user chose, and the harm is more than cosmetic and cannot be noticed and undone in one step.
+            - Also P1 or higher, whatever the trigger: the change defeats the purpose stated in the PR title or description, or it records a wrong number or conclusion in a maintained record such as documentation, an experiment log, a results table or an ADR.
+            - P2: a confirmed problem that meets neither P0 nor P1, because its trigger is uncommon, or its harm is cosmetic or can be noticed and undone in one step.
+            - A violation of a quoted AGENTS.md or CLAUDE.md rule is at least P2. Rate it higher when its harm meets P1 or P0.
+            - Report a conditional bug when the condition can realistically occur, and rate it by the rules above. Do not drop it because it depends on inputs or state.
             - Report every confirmed problem. Merge findings that share one root cause into one.
             - Do not report: style or naming preferences, missing comments, anything a linter or compiler would catch, or problems that existed before this PR unless the PR makes them worse.
 
