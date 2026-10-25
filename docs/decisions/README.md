@@ -69,3 +69,4 @@
 - [ADR-0044: Qwen3.5-4B for the small summary tier](ADR-0044_Qwen3.5-4B_for_the_small_summary_tier.md)
 - [ADR-0045: Follow the macOS appearance with one token set](ADR-0045_Follow_the_macOS_appearance_with_one_token_set.md)
 - [ADR-0046: Cancel running jobs cooperatively](ADR-0046_Cancel_running_jobs_cooperatively.md)
+- [ADR-0047: Auto-title recordings locally after transcription](ADR-0047_Auto-title_recordings_locally_after_transcription.md)

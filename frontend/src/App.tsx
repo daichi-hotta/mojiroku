@@ -22,7 +22,13 @@ import {
   useMeetingLiveSnapshot,
   type LiveSnapshot,
 } from "@/lib/tauri";
-import { elapsedSeconds, formatTimestamp, type RecordingRow, type StartingMeeting } from "@/lib/types";
+import {
+  elapsedSeconds,
+  formatTimestamp,
+  TITLE_JOB_KIND,
+  type RecordingRow,
+  type StartingMeeting,
+} from "@/lib/types";
 import { Sidebar } from "@/components/Sidebar";
 import { CheckIcon, StopIcon, VideoIcon, XIcon } from "@/components/icons";
 
@@ -171,6 +177,11 @@ function App() {
   // アプリ全体の job://update 購読（ADR-0024）。完了/失敗トースト＋最近更新＋処理中ドットの増減を
   // 一手に扱う。DetailView は自分のビュー更新に専念し、トーストはここへ集約（二重通知を避ける）。
   useJobUpdate((u) => {
+    // タイトル自動生成は裏方。付いたらサイドバーの名前だけ更新する。
+    if (u.kind === TITLE_JOB_KIND) {
+      if (u.status === "done") refreshRecents();
+      return;
+    }
     const active = u.status === "pending" || u.status === "running";
     setActiveJobIds((prev) => {
       const next = new Set(prev);

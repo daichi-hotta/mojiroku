@@ -75,6 +75,9 @@ export interface StartJobResult {
   job_id: string | null;
 }
 
+/** 文字起こし後のタイトル自動生成ジョブ（Issue #4）。裏方なので通知や処理中の表示に出さない。 */
+export const TITLE_JOB_KIND = "title";
+
 /** job://update イベントのペイロード。Rust 側 JobUpdate に対応（相関付けに job_id/recording_id）。 */
 export interface JobUpdate {
   job_id: string;

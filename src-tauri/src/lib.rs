@@ -95,6 +95,7 @@ pub fn run() {
             commands::transcription::health,
             commands::transcription::transcribe_file,
             commands::transcription::summarize,
+            commands::transcription::generate_title,
             commands::transcription::summary_model_info,
             commands::transcription::transcription_model_info,
             commands::transcription::download_live_transcription_models,

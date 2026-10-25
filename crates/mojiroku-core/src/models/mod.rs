@@ -334,6 +334,23 @@ pub fn select_summary_model_with(
     select_summary_model(total_memory_bytes, models_dir)
 }
 
+/// 手元にある要約モデルだけから選ぶ。**ダウンロードしない経路用**（Issue #4 のタイトル自動生成）。
+///
+/// 要約で選ばれるはずのモデル（[`select_summary_model_with`]）が手元にあればそれ。設定で別の
+/// モデルを選んだがまだ落としていない場合は、手元にある登録モデル。何も無ければ `None`。
+pub fn cached_summary_model(
+    requested: Option<&str>,
+    total_memory_bytes: Option<u64>,
+    models_dir: &Path,
+) -> Option<&'static SummaryModel> {
+    let chosen = select_summary_model_with(requested, total_memory_bytes, models_dir);
+    if cached(&models_dir.join(chosen.file)) {
+        return Some(chosen);
+    }
+    let fallback = select_summary_model(total_memory_bytes, models_dir);
+    cached(&models_dir.join(fallback.file)).then_some(fallback)
+}
+
 /// 文字起こしモデルの DL URL。
 pub fn whisper_model_url(file: &str) -> String {
     format!("{WHISPER_BASE}{file}")
@@ -1350,6 +1367,30 @@ mod tests {
                 select_summary_model(mem, &dir).file,
                 candidate.file,
                 "メモリ {mem:?}: 手元のモデルを無視して別のものを選んだ"
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// ダウンロードしない経路は手元のモデルだけを返す。設定の選択が未取得なら手元の別モデル。
+    #[test]
+    fn cached_summary_model_never_picks_a_missing_file() {
+        let empty = models_dir_with(&[]);
+        assert!(cached_summary_model(None, Some(16 * GIB), &empty).is_none());
+        let _ = fs::remove_dir_all(&empty);
+
+        let on_disk = SUMMARY_MODELS.iter().find(|m| m.adopted).expect("採用モデルが無い");
+        let other = SUMMARY_MODELS
+            .iter()
+            .find(|m| m.adopted && m.file != on_disk.file)
+            .expect("採用モデルが 2 件未満");
+        let dir = models_dir_with(&[on_disk.file]);
+        for mem in [None, Some(8 * GIB), Some(64 * GIB)] {
+            assert_eq!(cached_summary_model(None, mem, &dir).map(|m| m.file), Some(on_disk.file));
+            assert_eq!(
+                cached_summary_model(Some(other.file), mem, &dir).map(|m| m.file),
+                Some(on_disk.file),
+                "未取得の選択を返した"
             );
         }
         let _ = fs::remove_dir_all(&dir);

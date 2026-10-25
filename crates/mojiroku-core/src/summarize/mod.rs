@@ -5,7 +5,9 @@ pub mod byok;
 pub mod title;
 
 pub use byok::{AnthropicSummarizer, OpenAiSummarizer};
-pub use title::{build_title_prompt, sanitize_title};
+pub use title::{
+    build_title_prompt, is_default_title, sanitize_title, should_auto_title, title_template, DEFAULT_TITLES,
+};
 
 use crate::error::Result;
 use crate::lang::{default_speaker_label, Lang};

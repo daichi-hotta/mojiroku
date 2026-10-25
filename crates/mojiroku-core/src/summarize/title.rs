@@ -9,7 +9,7 @@
 //! と BYOK で経路が違うので、**両方がこの同じ関数を通る**ようにして経路依存部を最小にする。
 
 use crate::lang::Lang;
-use crate::schemas::{SummaryTemplate, TemplateKind, Transcript};
+use crate::schemas::{Recording, SourceType, SummaryTemplate, TemplateKind, Transcript};
 
 /// タイトルとして受け入れる最大文字数。指示は 20〜30 字を狙うが、超えたぶんを切り詰めると
 /// 意味の壊れた断片が残るので、**切らずに捨てて既定タイトルへ倒す**。
@@ -28,7 +28,7 @@ const TITLE_INSTRUCTION_EN: &str = "Give the meeting transcript below a single s
 ///
 /// `builtin_templates` には**入れない**。ユーザーが要約テンプレートとして選ぶものではなく、
 /// 内部利用だから（一覧に出ると「タイトル」を要約として実行できてしまう）。
-fn title_template(lang: Lang) -> SummaryTemplate {
+pub fn title_template(lang: Lang) -> SummaryTemplate {
     let (name, prompt) = match lang {
         Lang::Ja => ("タイトル", TITLE_INSTRUCTION_JA),
         Lang::En => ("Title", TITLE_INSTRUCTION_EN),
@@ -39,6 +39,34 @@ fn title_template(lang: Lang) -> SummaryTemplate {
         kind: TemplateKind::Summary,
         prompt: prompt.to_string(),
     }
+}
+
+/// バックエンドがタイトル未指定の録音に付ける既定名（`commands/recording.rs`）。
+/// これ以外のタイトル（カレンダーの予定名・利用者が付けた名前・ファイル名）は自動生成で上書きしない。
+pub const DEFAULT_TITLES: [&str; 4] = ["録音", "Recording", "会議", "Meeting"];
+
+/// タイトルが未設定か既定名か。
+pub fn is_default_title(title: Option<&str>) -> bool {
+    match title.map(str::trim) {
+        None | Some("") => true,
+        Some(t) => DEFAULT_TITLES.contains(&t),
+    }
+}
+
+/// 自動生成するのに必要な最小の発言数と文字数。短いメモからは中身のない題名しか出ない。
+const AUTO_TITLE_MIN_SEGMENTS: usize = 5;
+const AUTO_TITLE_MIN_CHARS: usize = 80;
+
+/// 文字起こしが終わった録音にタイトルを自動で付けてよいか（Issue #4）。
+/// - マイク録音と会議だけ。ファイル取り込みのファイル名は利用者が付けた手がかりなので残す
+/// - タイトルが既定名のときだけ（カレンダーの予定名や手で付けた名前は上書きしない）
+/// - 中身が短すぎないこと
+pub fn should_auto_title(rec: &Recording, transcript: &Transcript) -> bool {
+    if rec.source_type == SourceType::File || !is_default_title(rec.title.as_deref()) {
+        return false;
+    }
+    let chars: usize = transcript.segments.iter().map(|s| s.text.trim().chars().count()).sum();
+    transcript.segments.len() >= AUTO_TITLE_MIN_SEGMENTS && chars >= AUTO_TITLE_MIN_CHARS
 }
 
 /// 文字起こし → タイトル生成のプロンプト。長すぎる本文の切り詰めは sidecar 側が
@@ -61,6 +89,8 @@ pub fn sanitize_title(raw: &str) -> Option<String> {
     let body = strip_thinking(raw)?;
 
     let line = body.lines().map(str::trim).find(|l| !l.is_empty())?;
+    // クラウドのモデルは議事録向けのシステムプロンプトで動くので、Markdown の見出し・太字で返しうる。
+    let line = strip_markdown(line);
     let line = strip_label(line);
     let line = strip_wrappers(line);
     let line = line.trim().trim_end_matches(['。', '.']).trim();
@@ -90,6 +120,15 @@ fn strip_label(line: &str) -> &str {
     line
 }
 
+/// 行頭の見出し記号 `#` と、行全体を包む太字 `**…**` を落とす。
+fn strip_markdown(line: &str) -> &str {
+    let s = line.trim_start_matches('#').trim();
+    s.strip_prefix("**")
+        .and_then(|r| r.strip_suffix("**"))
+        .map(str::trim)
+        .unwrap_or(s)
+}
+
 /// 前後を包む引用符・かぎ括弧を落とす（対になっているときだけ）。
 fn strip_wrappers(line: &str) -> &str {
     let mut s = line;
@@ -115,6 +154,13 @@ fn strip_wrappers(line: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strips_markdown_from_cloud_outputs() {
+        assert_eq!(sanitize_title("# 週次定例の進捗確認").as_deref(), Some("週次定例の進捗確認"));
+        assert_eq!(sanitize_title("**Weekly sync on release plan**").as_deref(), Some("Weekly sync on release plan"));
+        assert_eq!(sanitize_title("## **タイトル: 「採用面談」**").as_deref(), Some("採用面談"));
+    }
 
     // ── 実測の出力をそのまま固定する（Issue #4・2026-08-24 の 10 本から） ──
 
@@ -224,4 +270,50 @@ mod tests {
             "title が builtin_templates に混ざっている"
         );
     }
+
+    fn rec(source_type: SourceType, title: Option<&str>) -> Recording {
+        Recording {
+            id: "r".into(),
+            source_type,
+            title: title.map(str::to_string),
+            duration_ms: 1,
+            sample_rate: 16000,
+            created_at: String::new(),
+        }
+    }
+
+    fn transcript(n: usize, text: &str) -> Transcript {
+        Transcript {
+            language: None,
+            segments: (0..n)
+                .map(|i| crate::schemas::Segment {
+                    idx: i as u32,
+                    start_ms: 0,
+                    end_ms: 1,
+                    text: text.into(),
+                    speaker_id: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn auto_title_only_replaces_default_names_of_mic_and_meeting_recordings() {
+        let long = transcript(6, "今週のリリース範囲を確認しました");
+        assert!(should_auto_title(&rec(SourceType::Mic, Some("録音")), &long));
+        assert!(should_auto_title(&rec(SourceType::Live, Some("Meeting")), &long));
+        assert!(should_auto_title(&rec(SourceType::Mic, None), &long));
+        // calendar or hand-written titles and file names stay
+        assert!(!should_auto_title(&rec(SourceType::Live, Some("週次定例")), &long));
+        assert!(!should_auto_title(&rec(SourceType::File, Some("interview_0918")), &long));
+        assert!(!should_auto_title(&rec(SourceType::File, None), &long));
+    }
+
+    #[test]
+    fn auto_title_needs_enough_content() {
+        let r = rec(SourceType::Mic, Some("録音"));
+        assert!(!should_auto_title(&r, &transcript(4, "今週のリリース範囲を確認しました")));
+        assert!(!should_auto_title(&r, &transcript(6, "はい")));
+    }
+
 }

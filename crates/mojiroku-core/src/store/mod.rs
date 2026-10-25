@@ -21,6 +21,7 @@ mod speaker;
 mod search;
 mod recording;
 mod translation;
+pub use job::TITLE_JOB_KIND;
 pub use translation::{validate_live_translations, SavedLiveTranslation};
 use embedding::{blob_to_f32, dot, f32_to_blob, l2_mean};
 
@@ -89,7 +90,7 @@ pub struct JobParams {
 pub struct Job {
     pub id: String,
     pub recording_id: String,
-    /// "transcribe" | "diarize"。
+    /// "transcribe" | "diarize" | "title"（[`TITLE_JOB_KIND`]）。
     pub kind: String,
     /// "pending" | "running" | "done" | "failed" | "canceled"。
     pub status: String,
@@ -1433,6 +1434,9 @@ mod tests {
         s.insert_recording_only(&failed).unwrap();
         s.enqueue_job("j3", "failed", "diarize", &p).unwrap();
         s.set_job_failed("j3", "error.job.no_speakers_found").unwrap();
+        // タイトル生成（Issue #4）は録音の状態に数えない。
+        s.enqueue_job("j4", "done", TITLE_JOB_KIND, &p).unwrap();
+        s.enqueue_job("j5", "failed", TITLE_JOB_KIND, &p).unwrap();
 
         let rows = s.list_recording_rows().unwrap();
         let ids: Vec<_> = rows.iter().map(|r| r.recording.id.as_str()).collect();

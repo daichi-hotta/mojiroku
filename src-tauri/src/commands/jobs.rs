@@ -119,13 +119,18 @@ pub(crate) fn diarize_recording(
 
 /// 進行中・要注意なジョブ一覧（pending/running/failed、更新の新しい順）。
 /// UI のキュー表示・履歴行の処理中/失敗バッジ用。完了（done/canceled）は含めない。
+/// タイトル生成（Issue #4）は裏方なので出さない。
 #[tauri::command]
 pub(crate) fn list_jobs(
     store: State<'_, SqliteStore>,
 ) -> Result<Vec<mojiroku_core::store::Job>, String> {
-    store
+    let jobs = store
         .list_jobs(&["pending", "running", "failed"])
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(jobs
+        .into_iter()
+        .filter(|j| j.kind != mojiroku_core::store::TITLE_JOB_KIND)
+        .collect())
 }
 
 /// ジョブをキャンセルする。pending はその場で canceled、running は中断を求め、ワーカーが

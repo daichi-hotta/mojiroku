@@ -118,6 +118,12 @@ const en: Dict = {
     deleted: "Deleted",
     renamed: "Title updated",
     renameTitle: "Rename",
+    generateTitle: "Generate a title from the transcript",
+    titleGenerated: "Title generated",
+    generateTitleCloudTitle: "Generate the title in the cloud?",
+    generateTitleCloudBody:
+      "Your summary engine is set to cloud, so the transcript will be sent to the cloud AI to create the title.",
+    generateTitleCloudConfirm: "Send and generate",
     deleteConfirmTitle: "Delete this recording?",
     deleteConfirmBody: (title: string) =>
       `“${title}”, along with its transcript and summaries, will be deleted. This cannot be undone.`,
@@ -691,6 +697,9 @@ const en: Dict = {
     "error.system_audio.no_display": "No display found",
     "error.summarize.api_key_missing": "Cloud summarization requires an API key (Settings → Summary engine)",
     "error.summarize.sidecar_failed": "Local summarization failed",
+    "error.title.not_generated": "Couldn't create a title. Try again or type one yourself",
+    "error.title.model_missing":
+      "The summary model isn't downloaded yet. Create a summary once, and title generation will work too",
     "error.model.download": "Model download failed (check your network connection)",
     // Certificate verification failure. Usually a traffic-inspecting middlebox, not the connection.
     "error.model.download_tls":
