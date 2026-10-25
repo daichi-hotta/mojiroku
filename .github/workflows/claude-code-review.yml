@@ -179,10 +179,10 @@ jobs:
             What to report
             - Set the severity from the trigger and the harm. The category of a problem does not set its severity.
             - The trigger is normal use when it is an action the product offers, an input or output the feature is meant to handle, or a routine run, however rarely it happens. It is uncommon only when it needs a coincidence of timing or state that the user does not control, or an environment the project does not target.
-            - P0: data loss, a security hole, or the product cannot start or release.
+            - P0: data loss, a security hole, or the product cannot start or release, whatever the trigger.
             - P1: should be fixed before merge. A normal-use trigger leads to a result that is wrong, lost, or overrides what the user chose, and the harm is more than cosmetic and cannot be noticed and undone in one step.
             - Also P1 or higher, whatever the trigger: the change defeats the purpose stated in the PR title or description, or it records a wrong number or conclusion in a maintained record such as documentation, an experiment log, a results table or an ADR.
-            - P2: a confirmed problem that does not meet P1, because its trigger is uncommon, or its harm is cosmetic or can be noticed and undone in one step. The purpose and record rule above still makes a finding P1 or higher.
+            - P2: a confirmed problem that meets neither P0 nor P1, because its trigger is uncommon, or its harm is cosmetic or can be noticed and undone in one step.
             - A violation of a quoted AGENTS.md or CLAUDE.md rule is at least P2. Rate it higher when its harm meets P1 or P0.
             - Report a conditional bug when the condition can realistically occur, and rate it by the rules above. Do not drop it because it depends on inputs or state.
             - Report every confirmed problem. Merge findings that share one root cause into one.
