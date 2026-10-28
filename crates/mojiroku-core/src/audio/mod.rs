@@ -10,9 +10,9 @@ use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::DecoderOptions;
+use symphonia::core::codecs::{Decoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::FormatOptions;
+use symphonia::core::formats::{FormatOptions, FormatReader, Track};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
@@ -48,18 +48,13 @@ fn decode_to_mono_f32<P: AsRef<Path>>(path: P) -> Result<(Vec<f32>, u32)> {
         .map_err(|e| CoreError::Audio(format!("probe: {e}")))?;
     let mut format = probed.format;
 
-    let track = format
-        .default_track()
-        .ok_or_else(|| CoreError::Audio("no default track".into()))?;
-    let track_id = track.id;
+    let track = default_track(format.as_ref())?;
+    let mut track_id = track.id;
     let src_rate = track
         .codec_params
         .sample_rate
         .ok_or_else(|| CoreError::Audio("unknown sample rate".into()))?;
-
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| CoreError::Audio(format!("make decoder: {e}")))?;
+    let mut decoder = make_decoder(track)?;
 
     let mut mono: Vec<f32> = Vec::new();
     loop {
@@ -69,7 +64,19 @@ fn decode_to_mono_f32<P: AsRef<Path>>(path: P) -> Result<(Vec<f32>, u32)> {
             Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 break
             }
-            Err(SymphoniaError::ResetRequired) => break,
+            // 連結した Ogg（チェーン）は、次のストリームの先頭でトラックが入れ替わる。
+            // デコーダを作り直して続きを読む。サンプルレートが変わる連結は扱わない。
+            Err(SymphoniaError::ResetRequired) => {
+                let track = default_track(format.as_ref())?;
+                if track.codec_params.sample_rate != Some(src_rate) {
+                    return Err(CoreError::Audio(
+                        "chained stream changes the sample rate".into(),
+                    ));
+                }
+                track_id = track.id;
+                decoder = make_decoder(track)?;
+                continue;
+            }
             Err(e) => return Err(CoreError::Audio(format!("next_packet: {e}"))),
         };
         if packet.track_id() != track_id {
@@ -94,6 +101,18 @@ fn decode_to_mono_f32<P: AsRef<Path>>(path: P) -> Result<(Vec<f32>, u32)> {
     }
 
     Ok((mono, src_rate))
+}
+
+fn default_track(format: &dyn FormatReader) -> Result<&Track> {
+    format
+        .default_track()
+        .ok_or_else(|| CoreError::Audio("no default track".into()))
+}
+
+fn make_decoder(track: &Track) -> Result<Box<dyn Decoder>> {
+    symphonia::default::get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|e| CoreError::Audio(format!("make decoder: {e}")))
 }
 
 /// mono f32 を 16kHz にリサンプル（rubato, 高品質 sinc）。すでに 16k ならそのまま返す。
@@ -336,7 +355,22 @@ mod tests {
     /// -strict -2 -map_metadata -1 -fflags +bitexact -flags:a +bitexact sine_440hz_1s.ogg`
     #[test]
     fn decodes_ogg_vorbis_to_16k_mono() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sine_440hz_1s.ogg");
-        assert_one_second_440hz_at_16k(&decode_to_pcm16k_mono(path).unwrap());
+        assert_one_second_440hz_at_16k(&decode_to_pcm16k_mono(vorbis_fixture()).unwrap());
+    }
+
+    /// 2 本を連結した Ogg（チェーン）は、1 本目で止めずに最後まで読む。
+    #[test]
+    fn decodes_every_stream_of_a_chained_ogg() {
+        let one = std::fs::read(vorbis_fixture()).unwrap();
+        let pcm = decode_bytes("chained.ogg", &[one.as_slice(), one.as_slice()].concat());
+        assert!(
+            (pcm.len() as i32 - 32_000).abs() < 1024,
+            "decoded len = {}",
+            pcm.len()
+        );
+    }
+
+    fn vorbis_fixture() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sine_440hz_1s.ogg")
     }
 }
