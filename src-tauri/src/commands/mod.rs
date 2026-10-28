@@ -308,6 +308,8 @@ pub(crate) fn job_progress_callback(
 /// 取り込みを受け付ける拡張子（大文字小文字は区別しない）。ファイル選択とドロップの絞り込み
 /// （`frontend/src/features/home/HomeView.tsx` の `AUDIO_EXT`）を必ず含めること。
 /// 含め忘れると、画面で選べるファイルがここで拒否される。mp4 / mov はデコーダの isomp4 が読む動画コンテナ。
+/// 足す形式は、`crates/mojiroku-core/Cargo.toml` の symphonia の features で読めるものに限る
+/// （読めないと、受け付けたあとバックグラウンドのジョブでデコードに失敗する）。
 const IMPORT_EXTENSIONS: &[&str] = &[
     "mp3", "wav", "m4a", "aac", "aiff", "flac", "ogg", "mp4", "mov",
 ];

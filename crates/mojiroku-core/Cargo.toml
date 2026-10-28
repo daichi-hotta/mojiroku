@@ -26,13 +26,19 @@ sherpa-onnx = { version = "1.13.3", default-features = false, features = ["stati
 tar = "0.4"
 bzip2 = "0.4"
 
-# 音声デコード（mp3/aac/alac/mp4/wav/pcm）+ リサンプル。
+# 音声デコード（mp3/aac/alac/mp4/wav/aiff/flac/ogg vorbis/pcm）+ リサンプル。
+# 取り込みの拡張子（HomeView.tsx の AUDIO_EXT・commands/mod.rs の IMPORT_EXTENSIONS）は
+# ここで読める形式だけにする。ogg は Vorbis だけを読み、Opus は読まない。
 symphonia = { version = "0.5", default-features = false, features = [
     "mp3",
     "aac",
     "alac",
     "isomp4",
     "wav",
+    "aiff",
+    "flac",
+    "ogg",
+    "vorbis",
     "pcm",
 ] }
 rubato = "0.16"
