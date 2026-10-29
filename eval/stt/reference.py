@@ -152,8 +152,9 @@ def parse_reference(raw: str) -> tuple[list[dict], str]:
                          "text": groups.get("text") or "", "prefix": None})
         elif cues:
             body = line
-            if name == "time-only" and not cues[-1]["text"]:
-                # Only a cue's first line can name its speaker; _accept_speakers decides.
+            if name == "time-only" and cues[-1]["prefix"] is None and not cues[-1]["text"]:
+                # Only a cue's first line can name its speaker, even when that line holds
+                # only the label; _accept_speakers decides.
                 cues[-1]["prefix"], body = _split_speaker(line)
             cues[-1]["text"] += body
     if not cues:

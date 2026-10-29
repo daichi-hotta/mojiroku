@@ -45,6 +45,9 @@ class ParseTests(unittest.TestCase):
         cues, _ = reference.parse_reference("00:00:01\n議題: 予算\n00:00:05\n次は 10:00から\n")
         self.assertEqual([c["speaker"] for c in cues], [None, None])
         self.assertEqual([c["text"] for c in cues], ["議題:予算", "次は 10:00から"])
+        cues, _ = reference.parse_reference("00:01:02\nアリス:\n議題: 予算\n00:01:10\nアリス: はい\n")
+        self.assertEqual([c["speaker"] for c in cues], ["アリス", "アリス"])
+        self.assertEqual(cues[0]["text"], "議題: 予算")
 
     def test_bracket_name_time_txt(self):
         raw = "[Alice Smith] 13:02:11\nこんにちは\n続きです\n[Bob] 13:02:20\nはい\n"
