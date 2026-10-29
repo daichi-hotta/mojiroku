@@ -28,6 +28,7 @@ from metrics import NORMALIZATION, tokens
 
 REPORT_VERSION = "reference-compare-v1"
 DP_LIMIT = 1_500_000
+CLIP_MARGIN_MS = 10_000
 ANCHOR_SIZES = (12, 8, 5, 3)
 TIME = r"\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?"
 # Whole edit runs made only of these are fillers/backchannels, not content errors.
@@ -44,18 +45,19 @@ HALLUCINATIONS = ("ご視聴ありがとうございました", "チャンネル
 class Unit:
     """One normalised character with the time (ms) and speaker it belongs to."""
 
-    __slots__ = ("char", "ms", "speaker")
+    __slots__ = ("char", "ms", "speaker", "group")
 
-    def __init__(self, char: str, ms: float, speaker: str | None):
-        self.char, self.ms, self.speaker = char, ms, speaker
+    def __init__(self, char: str, ms: float, speaker: str | None, group: int = -1):
+        # group: index of the reference cue or mojiroku segment the character came from.
+        self.char, self.ms, self.speaker, self.group = char, ms, speaker, group
 
 
-def spread(text: str, start_ms: float, end_ms: float, speaker: str | None) -> list[Unit]:
+def spread(text: str, start_ms: float, end_ms: float, speaker: str | None, group: int = -1) -> list[Unit]:
     chars = tokens(text, "ja")
     if not chars:
         return []
     step = max(end_ms - start_ms, 0) / len(chars)
-    return [Unit(c, start_ms + step * (n + 0.5), speaker) for n, c in enumerate(chars)]
+    return [Unit(c, start_ms + step * (n + 0.5), speaker, group) for n, c in enumerate(chars)]
 
 
 # ── reference parsing ────────────────────────────────────────────────────────
@@ -176,8 +178,8 @@ def reference_units(cues: list[dict]) -> tuple[list[Unit], dict]:
     labels = {speaker: f"R{n}" for n, speaker in enumerate(named, 1)}
     labels[None] = "R?"
     units = []
-    for cue in cues:
-        units += spread(cue["text"], cue["start"], cue["end"], labels[cue["speaker"]])
+    for n, cue in enumerate(cues):
+        units += spread(cue["text"], cue["start"], cue["end"], labels[cue["speaker"]], n)
     return units, {labels[s]: totals[s] for s in totals}
 
 
@@ -229,9 +231,9 @@ def saved_segments(conn: sqlite3.Connection, recording_id: str) -> list[dict]:
 
 def hypothesis_units(segments: list[dict]) -> list[Unit]:
     units = []
-    for segment in segments:
+    for n, segment in enumerate(segments):
         units += spread(segment["text"], segment["start_ms"], segment["end_ms"],
-                        segment.get("speaker_id") or "-")
+                        segment.get("speaker_id") or "-", n)
     return units
 
 
@@ -461,17 +463,38 @@ def mmss(ms: float) -> str:
     return f"{seconds // 3600:d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
 
 
-def analyse(ref_units: list[Unit], hyp_units: list[Unit], window_min: int = 5) -> dict:
+def _median_offset(ops: list[tuple], ref_units: list[Unit], hyp_units: list[Unit]) -> list[float]:
+    return [ref_units[i].ms - hyp_units[j].ms for op, i, j in ops if op == "="]
+
+
+def analyse(ref_units: list[Unit], hyp_units: list[Unit], window_min: int = 5,
+            segments: list[dict] | None = None, cues: list[dict] | None = None, clip: bool = True) -> dict:
     ref = "".join(u.char for u in ref_units)
-    hyp = "".join(u.char for u in hyp_units)
     if not ref:
         raise SystemExit("reference has no characters after normalisation")
+    # Score only the time both transcripts cover: an export that stops early must not count
+    # the rest of the recording as invented text. The first pass finds the clock offset.
+    outside: Counter = Counter()
+    if clip and hyp_units:
+        first_ops, _ = align(ref, "".join(u.char for u in hyp_units))
+        first = _median_offset(first_ops, ref_units, hyp_units)
+        if first:
+            shift = statistics.median(first)
+            lo, hi = ref_units[0].ms - CLIP_MARGIN_MS, ref_units[-1].ms + CLIP_MARGIN_MS
+            kept = []
+            for unit in hyp_units:
+                if lo <= unit.ms + shift <= hi:
+                    kept.append(unit)
+                else:
+                    outside[unit.speaker] += 1
+            hyp_units = kept
+    hyp = "".join(u.char for u in hyp_units)
     ops, unaligned = align(ref, hyp)
     counts = Counter(op for op, _, _ in ops)
     errors = counts["S"] + counts["D"] + counts["I"]
 
     # Clock offset between the reference and mojiroku timelines, from matched characters.
-    offsets = [ref_units[i].ms - hyp_units[j].ms for op, i, j in ops if op == "="]
+    offsets = _median_offset(ops, ref_units, hyp_units)
     offset = statistics.median(offsets) if offsets else 0.0
     quartiles = statistics.quantiles(offsets, n=4) if len(offsets) >= 4 else [offset] * 3
     ref_start = ref_units[0].ms
@@ -544,9 +567,13 @@ def analyse(ref_units: list[Unit], hyp_units: list[Unit], window_min: int = 5) -
         return round(e / n, 4) if n else None
 
     no_filler_errors = errors - categories["filler"]["errors"] if "filler" in categories else errors
+    diagnostics = (segment_diagnostics(ops, ref_units, hyp_units, segments, cues, offset, confusion)
+                   if segments is not None and cues is not None else None)
     return {
         "reference_chars": len(ref),
         "mojiroku_chars": len(hyp),
+        "mojiroku_chars_outside_reference_span": dict(outside),
+        "segment_diagnostics": diagnostics,
         "errors": errors,
         "cer": rate(errors, len(ref)),
         "substitutions": counts["S"],
@@ -567,6 +594,79 @@ def analyse(ref_units: list[Unit], hyp_units: list[Unit], window_min: int = 5) -
         "windows": [{"from": mmss(w * window_min * 60_000), "ref_chars": v["ref_chars"],
                      "errors": v["errors"], "cer": rate(v["errors"], v["ref_chars"])}
                     for w, v in sorted(windows.items())],
+    }
+
+
+def segment_diagnostics(ops: list[tuple], ref_units: list[Unit], hyp_units: list[Unit],
+                        segments: list[dict], cues: list[dict], offset: float,
+                        confusion: dict[str, Counter]) -> dict:
+    """Whole mojiroku segments the reference does not support, and whole reference cues
+    mojiroku missed, with what was happening on the other side at that time. Counts only."""
+    seg_total, seg_matched = Counter(), Counter()
+    for unit in hyp_units:
+        seg_total[unit.group] += 1
+    cue_total, cue_matched = Counter(), Counter()
+    for unit in ref_units:
+        cue_total[unit.group] += 1
+    for op, i, j in ops:
+        if op == "=":
+            seg_matched[hyp_units[j].group] += 1
+            cue_matched[ref_units[i].group] += 1
+
+    def track(segment: dict) -> str:
+        return "mic" if segment.get("speaker_id") == "self" else "system"
+
+    remote = [(seg["start_ms"], seg["end_ms"], _trigrams(seg["text"]))
+              for n, seg in enumerate(segments) if track(seg) == "system" and seg_total[n]]
+    unsupported: dict[str, Counter] = defaultdict(Counter)
+    phrases: dict[str, Counter] = defaultdict(Counter)
+    duplicates = Counter()
+    for n, segment in enumerate(segments):
+        total = seg_total[n]
+        if not total:
+            continue  # empty or outside the scored span
+        supported = seg_matched[n] >= 0.5 * total
+        for phrase in HALLUCINATIONS:
+            if phrase in segment["text"]:
+                phrases[phrase]["in_reference" if supported else "not_in_reference"] += 1
+        previous = segments[n - 1] if n else None
+        if previous and previous["text"].strip() == segment["text"].strip() and \
+                previous.get("speaker_id") == segment.get("speaker_id"):
+            duplicates["in_reference" if supported else "not_in_reference"] += 1
+        if total < 4 or seg_matched[n] >= 0.3 * total:
+            continue
+        side = track(segment)
+        unsupported[side]["segments"] += 1
+        unsupported[side]["chars"] += total
+        if side == "mic":
+            grams = _trigrams(segment["text"])
+            near = [(a, b, g) for a, b, g in remote
+                    if a < segment["end_ms"] + 5000 and b > segment["start_ms"] - 5000]
+            if any(a < segment["end_ms"] and b > segment["start_ms"] for a, b, _ in near):
+                unsupported[side]["while_system_track_has_speech"] += 1
+            if grams and any(len(grams & g) >= 0.3 * len(grams) for _, _, g in near):
+                unsupported[side]["resembles_nearby_system_text"] += 1
+
+    # A reference speaker heard mostly as 'self' talks into the mic track.
+    on_mic = {speaker for speaker, row in confusion.items() if row and row.most_common(1)[0][0] == "self"}
+    missed: dict[str, Counter] = defaultdict(Counter)
+    for n, cue in enumerate(cues):
+        total = cue_total[n]
+        if total < 4 or cue_matched[n] >= 0.3 * total:
+            continue
+        speaker = next(u.speaker for u in ref_units if u.group == n)
+        side = "mic" if speaker in on_mic else "system"
+        start, end = cue["start"] - offset, cue["end"] - offset
+        covered = any(track(seg) == side and seg["start_ms"] < end and seg["end_ms"] > start
+                      for seg in segments)
+        missed[side]["cues"] += 1
+        missed[side]["chars"] += total
+        missed[side]["mojiroku_had_a_segment_then" if covered else "no_mojiroku_segment_then"] += 1
+    return {
+        "mojiroku_segments_not_in_reference": {k: dict(v) for k, v in unsupported.items()},
+        "reference_cues_missed": {k: dict(v) for k, v in missed.items()},
+        "known_hallucination_phrases": {k: dict(v) for k, v in phrases.items()},
+        "repeated_previous_segment": dict(duplicates),
     }
 
 
@@ -623,6 +723,9 @@ def print_report(result: dict, out=sys.stdout) -> None:
         return "n/a" if value is None else f"{value * 100:.1f}%"
 
     line(f"Reference chars {result['reference_chars']:,}  mojiroku chars {result['mojiroku_chars']:,}")
+    if result["mojiroku_chars_outside_reference_span"]:
+        line(f"Not scored (mojiroku text outside the reference's time span): "
+             f"{result['mojiroku_chars_outside_reference_span']}")
     line(f"CER {pct(result['cer'])}  (S {result['substitutions']:,} / D {result['deletions']:,} / "
          f"I {result['insertions']:,})  without filler runs {pct(result['cer_without_filler_runs'])}")
     if result["unaligned_units"]:
@@ -648,6 +751,11 @@ def print_report(result: dict, out=sys.stdout) -> None:
     for window in result["windows"]:
         line(f"  {window['from']}  {window['ref_chars']:>6,} chars  CER {pct(window['cer'])}")
     line()
+    if result.get("segment_diagnostics"):
+        line("Segment diagnostics:")
+        for key, value in result["segment_diagnostics"].items():
+            line(f"  {key}: {value}")
+        line()
     events = result["long_events"]
     line(f"Long one-sided stretches: {len(events)} (time = mojiroku position)")
     for event in events[:40]:
@@ -743,6 +851,8 @@ def main(argv: list[str] | None = None) -> None:
         command.add_argument("--recording-id")
         command.add_argument("--json-out", type=Path, help="also write the aggregate report as JSON")
         command.add_argument("--window-min", type=int, default=5)
+        command.add_argument("--no-clip", action="store_true",
+                             help="also score mojiroku text outside the reference's time span")
     rerun = sub.choices["rerun"]
     rerun.add_argument("--recordings", type=Path, required=True, help="the app's recordings folder")
     rerun.add_argument("--models", type=Path, required=True, help="the app's models folder")
@@ -773,7 +883,7 @@ def main(argv: list[str] | None = None) -> None:
           f"mic offset {rec['mic_offset_ms']} ms, jobs {rec['jobs']}")
     print(f"mojiroku hygiene: {report['mojiroku_hygiene']}")
 
-    saved = analyse(ref_units, hypothesis_units(segments), args.window_min)
+    saved = analyse(ref_units, hypothesis_units(segments), args.window_min, segments, cues, not args.no_clip)
     report["comparison"] = saved
     if args.command == "saved":
         print_report(saved)
@@ -797,7 +907,8 @@ def main(argv: list[str] | None = None) -> None:
                 per_track.append((track_segments, speaker, shift))
                 seconds += took
             variant_segments = merged_segments(per_track)
-            result = analyse(ref_units, hypothesis_units(variant_segments), args.window_min)
+            result = analyse(ref_units, hypothesis_units(variant_segments), args.window_min,
+                             variant_segments, cues, not args.no_clip)
             report["variants"][name] = {"pipeline_seconds": seconds, "hygiene": hygiene(variant_segments),
                                         "comparison": result}
             rows.append(summary_row(name, result, seconds))

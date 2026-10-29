@@ -149,6 +149,38 @@ class CategoryTests(unittest.TestCase):
         self.assertEqual(reference.categorise("ー", ""), "other")
 
 
+class AnalyseTests(unittest.TestCase):
+    def test_text_after_the_reference_ends_is_not_scored(self):
+        ref = reference.spread("あいうえおかきくけこさしすせそ", 60_000, 70_000, "R1", 0)
+        hyp = (reference.spread("あいうえおかきくけこさしすせそ", 0, 10_000, "S1", 0)
+               + reference.spread("たちつてと" * 6, 100_000, 120_000, "S1", 1))
+        result = reference.analyse(ref, hyp)
+        self.assertEqual(result["errors"], 0)
+        self.assertEqual(result["mojiroku_chars_outside_reference_span"], {"S1": 30})
+        unclipped = reference.analyse(ref, hyp, clip=False)
+        self.assertEqual(unclipped["errors"], 30)
+
+    def test_segment_diagnostics(self):
+        cues = [{"start": 0, "end": 4000, "speaker": "A", "text": "来週の打ち合わせは水曜日にしましょう"},
+                {"start": 10_000, "end": 13_000, "speaker": "B", "text": "資料をすぐに送ります"}]
+        segments = [
+            {"start_ms": 0, "end_ms": 4000, "text": "来週の打ち合わせは水曜日にしましょう", "speaker_id": "S1"},
+            {"start_ms": 1000, "end_ms": 4000, "text": "打ち合わせ水曜日しましょう", "speaker_id": "self"},
+            {"start_ms": 20_000, "end_ms": 21_000, "text": "ご視聴ありがとうございました", "speaker_id": "S1"},
+        ]
+        ref_units, _ = reference.reference_units(cues)
+        result = reference.analyse(ref_units, reference.hypothesis_units(segments),
+                                   segments=segments, cues=cues, clip=False)
+        diagnostics = result["segment_diagnostics"]
+        self.assertEqual(diagnostics["mojiroku_segments_not_in_reference"]["mic"],
+                         {"segments": 1, "chars": 13, "while_system_track_has_speech": 1,
+                          "resembles_nearby_system_text": 1})
+        self.assertEqual(diagnostics["reference_cues_missed"],
+                         {"system": {"cues": 1, "chars": 10, "no_mojiroku_segment_then": 1}})
+        self.assertEqual(diagnostics["known_hallucination_phrases"],
+                         {"ご視聴ありがとうございました": {"not_in_reference": 1}})
+
+
 class HygieneTests(unittest.TestCase):
     def test_mic_echo_of_remote_speech_is_counted(self):
         segments = [
@@ -206,7 +238,8 @@ class EndToEndTests(unittest.TestCase):
             with contextlib.redirect_stdout(buffer):
                 reference.main(argv)
             printed = buffer.getvalue() + out.read_text(encoding="utf-8")
-            for secret in (self.SECRET_NAME, "大地", "鈴蘭", "予算", "よろしく", "ご視聴", "秘密", "別の"):
+            # Phrases from the fixed public HALLUCINATIONS list may be named; nothing else.
+            for secret in (self.SECRET_NAME, "大地", "鈴蘭", "予算", "よろしく", "秘密", "別の"):
                 self.assertNotIn(secret, printed)
             report = json.loads(out.read_text(encoding="utf-8"))
             comparison = report["comparison"]
