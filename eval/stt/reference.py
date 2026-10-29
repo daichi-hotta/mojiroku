@@ -802,7 +802,7 @@ def _dbfs(handle, start_ms: float, end_ms: float) -> float | None:
               for i in range(0, len(samples), frame)]
     width = min(3, len(powers))
     power = max(sum(powers[i:i + width]) / width for i in range(len(powers) - width + 1))
-    return 20 * math.log10(max(math.sqrt(power), 1) / 32768)
+    return 10 * math.log10(max(power / 32768 ** 2, 1e-12))  # the same −120 dBFS floor
 
 
 def segment_levels(recordings: Path, recording: dict, segments: list[dict]) -> dict[int, tuple[float, float]]:

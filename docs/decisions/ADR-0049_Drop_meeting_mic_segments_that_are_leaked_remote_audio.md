@@ -115,6 +115,9 @@ versus full (ADR-0034).
   level, is dropped as well. Owners with headphones are unaffected in practice: without
   leakage, the mic is rarely quieter than the system track during speech.
 - Each two-track transcription decodes both tracks once more. That step was not timed on
-  its own. Peak memory is one track's 16 kHz PCM, and no model is loaded at that point.
+  its own. Its peak memory equals the earlier decode of the same track: the mono buffer at
+  the source rate (48 kHz for system audio) plus its 16 kHz copy, about 0.9 GB for an hour
+  of system audio. Only one track is decoded at a time, and the Whisper model of the mic
+  step has already been released.
 - `eval/stt/reference.py` and the `meeting_cli` example can repeat this measurement on any
   private meeting with an exported transcript, printing numbers only.
