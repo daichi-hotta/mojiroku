@@ -88,6 +88,7 @@ pub fn run() {
             model_downloads::list_model_downloads,
             model_downloads::start_model_download,
             translation_history::list_live_translations,
+            translation_history::list_live_captions,
             live_translation::begin_live_translation,
             live_translation::end_live_translation,
             live_translation::cancel_live_translation_request,

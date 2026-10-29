@@ -17,6 +17,10 @@
 //!
 //! Since ADR-0035, a present VAD model handles quiet nonzero tails; the RMS gate
 //! below is only a fallback when VAD is unavailable. Digital silence is always skipped.
+//!
+//! Since ADR-0048, the captions shown are also kept for the whole meeting (outside the
+//! 80-line display window) and saved with the recording at Stop as its live transcript.
+//! The final dual-track transcript stays the authoritative one.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +32,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use mojiroku_core::models::{DEFAULT_VAD_MODEL, DEFAULT_WHISPER_MODEL};
+use mojiroku_core::store::{LiveCaptionArchive, SavedLiveCaption};
 use mojiroku_core::stt::{SttEngine, WhisperStt};
 
 use crate::audio::spool::SharedPcm;
@@ -48,7 +53,7 @@ const MIN_TAIL_MS: u64 = 2000;
 const COMMIT_GUARD_MS: u64 = 1500;
 /// tail がこれを超えたら（連続発話で確定点が出ない等）強制的に前進させる上限。
 const MAX_TAIL_MS: u64 = 14000;
-/// 表示保持する確定行の上限（古いものから捨てる）。
+/// 表示保持する確定行の上限（古いものから捨てる）。The saved archive keeps every line.
 const MAX_LINES: usize = 80;
 /// tail 全体がこの RMS 未満なら無音とみなし whisper に渡さない。
 const SILENCE_RMS: f32 = 1e-3;
@@ -84,6 +89,8 @@ pub struct LiveSttSession {
     app: AppHandle,
     stop: Arc<AtomicBool>,
     handle: JoinHandle<()>,
+    /// Shared with the worker so lines committed before a worker panic are still saved.
+    archive: Arc<Mutex<LiveCaptionArchive>>,
 }
 
 /// managed state。会議録音の全 teardown 経路（stop/cancel/rollback/離脱）から `stop` を呼ぶ。
@@ -121,6 +128,8 @@ pub fn start(
     let worker_app = app.clone();
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_for_worker = Arc::clone(&stop_flag);
+    let archive = Arc::new(Mutex::new(LiveCaptionArchive::new()));
+    let archive_for_worker = Arc::clone(&archive);
     let handle = std::thread::spawn(move || {
         // panic ガード: ワーカーの panic を呑み、録音経路へ波及させない。
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -132,6 +141,7 @@ pub fn start(
                 system,
                 language.as_deref(),
                 &stop_for_worker,
+                &archive_for_worker,
             );
         }));
         if result.is_err() {
@@ -144,17 +154,38 @@ pub fn start(
         app,
         stop: stop_flag,
         handle,
+        archive,
     });
 }
 
 /// ライブ文字起こしを停止して join する。全 teardown 経路から呼ぶ。冪等（未起動でも安全）。
+/// The live transcript is dropped; Stop-and-save uses `stop_and_take`.
 pub fn stop(state: &LiveSttState) {
+    let _ = stop_and_take(state);
+}
+
+/// Stop and join like `stop`, then return the session's live transcript for saving
+/// (ADR-0048): every committed line plus the unfinished tail last shown. Empty when no
+/// session ran or live captions were unavailable.
+pub fn stop_and_take(state: &LiveSttState) -> Vec<SavedLiveCaption> {
     let session = state.0.lock().unwrap().take();
-    if let Some(s) = session {
-        s.stop.store(true, Ordering::Relaxed);
-        crate::live_translation::cancel_session(&s.app, &s.session_id);
-        let _ = s.handle.join();
-    }
+    let Some(s) = session else {
+        return Vec::new();
+    };
+    s.stop.store(true, Ordering::Relaxed);
+    crate::live_translation::cancel_session(&s.app, &s.session_id);
+    let _ = s.handle.join();
+    let archive = std::mem::take(&mut *lock_archive(&s.archive));
+    archive.into_rows()
+}
+
+/// The worker may have panicked while holding the lock; its data is still valid.
+fn lock_archive(
+    archive: &Mutex<LiveCaptionArchive>,
+) -> std::sync::MutexGuard<'_, LiveCaptionArchive> {
+    archive
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub(crate) fn session_id(state: &LiveSttState) -> Option<String> {
@@ -248,10 +279,29 @@ fn emit<R: tauri::Runtime>(
     count: u64,
     committed: &VecDeque<String>,
     live: &[String],
+    archive: &Mutex<LiveCaptionArchive>,
 ) {
+    // Keep the saved tail equal to what the UI shows, under the same caption IDs.
+    lock_archive(archive).set_tail(count, live);
     let _ = app.emit("meeting://live", payload(session, count, committed, live));
 }
 
+/// Commit one line: the display window and the saved archive get it under the same ID.
+fn commit_line(
+    committed: &mut VecDeque<String>,
+    count: &mut u64,
+    archive: &mut LiveCaptionArchive,
+    text: String,
+) {
+    archive.commit(*count, &text);
+    committed.push_back(text);
+    *count += 1;
+    if committed.len() > MAX_LINES {
+        committed.pop_front();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_worker<R: tauri::Runtime>(
     app: &AppHandle<R>,
     session: &str,
@@ -260,6 +310,7 @@ fn run_worker<R: tauri::Runtime>(
     system: Option<SystemHandle>,
     language: Option<&str>,
     stop: &AtomicBool,
+    archive: &Mutex<LiveCaptionArchive>,
 ) {
     // whisper ロード（VAD 付き）。モデル未 DL / ロード失敗 = ライブ表示なしで静かに終了
     // （録音は継続。停止時の本番文字起こしが必要ならモデルを DL する）。
@@ -301,7 +352,7 @@ fn run_worker<R: tauri::Runtime>(
     let mut sys_consumed: u64 = 0;
     let mut committed: VecDeque<String> = VecDeque::new();
     let mut committed_count = 0;
-    emit(app, session, committed_count, &committed, &[]);
+    emit(app, session, committed_count, &committed, &[], archive);
 
     while !stop.load(Ordering::Relaxed) {
         let t0 = Instant::now();
@@ -379,7 +430,7 @@ fn run_worker<R: tauri::Runtime>(
                 );
             }
             drop(permit);
-            emit(app, session, committed_count, &committed, &[]);
+            emit(app, session, committed_count, &committed, &[], archive);
             sleep_remainder(t0, stop);
             continue;
         }
@@ -407,11 +458,12 @@ fn run_worker<R: tauri::Runtime>(
                 continue;
             }
             if seg.end_ms <= commit_ms {
-                committed.push_back(text);
-                committed_count += 1;
-                if committed.len() > MAX_LINES {
-                    committed.pop_front();
-                }
+                commit_line(
+                    &mut committed,
+                    &mut committed_count,
+                    &mut lock_archive(archive),
+                    text,
+                );
                 max_committed_end_ms = max_committed_end_ms.max(seg.end_ms);
             } else {
                 live.push(text);
@@ -431,7 +483,7 @@ fn run_worker<R: tauri::Runtime>(
         }
 
         // 7) 送信（確定 + 未確定）。
-        emit(app, session, committed_count, &committed, &live);
+        emit(app, session, committed_count, &committed, &live, archive);
 
         sleep_remainder(t0, stop);
     }
@@ -481,6 +533,7 @@ mod tests {
                 None,
                 None,
                 &worker_stop,
+                &Mutex::new(LiveCaptionArchive::new()),
             )
         });
         let translator_app = app.handle().clone();
@@ -577,6 +630,39 @@ mod tests {
             after.session_id,
             payload("two", 0, &VecDeque::new(), &[]).session_id
         );
+    }
+
+    #[test]
+    fn saved_captions_keep_every_line_under_the_ids_the_ui_saw() {
+        let mut committed = VecDeque::new();
+        let mut count = 0;
+        let mut archive = LiveCaptionArchive::new();
+        for index in 0..200 {
+            commit_line(
+                &mut committed,
+                &mut count,
+                &mut archive,
+                format!("line {index}"),
+            );
+        }
+        let shown = payload("one", count, &committed, &["draft".into()]);
+        assert_eq!(shown.lines.len(), MAX_LINES + 1);
+        archive.set_tail(count, &["draft".into()]);
+        let saved = archive.into_rows();
+        assert_eq!(saved.len(), 201);
+        for line in &shown.lines {
+            let row = saved
+                .iter()
+                .find(|row| row.caption_id == line.id as i64)
+                .expect("every shown line is saved");
+            assert_eq!(row.text, line.text);
+            assert_eq!(row.committed, line.committed);
+        }
+    }
+
+    #[test]
+    fn stopping_without_a_session_saves_no_captions() {
+        assert!(stop_and_take(&LiveSttState::new()).is_empty());
     }
 
     #[test]

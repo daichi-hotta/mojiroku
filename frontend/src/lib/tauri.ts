@@ -12,6 +12,7 @@ import type {
   Recording,
   RecordingDetail,
   RecordingRow,
+  SavedLiveCaption,
   SearchHit,
   Settings,
   StartJobResult,
@@ -338,6 +339,10 @@ export const stopMeetingRecording = (title?: string | null, translations: SavedL
 
 export const listLiveTranslations = (id: string) =>
   invoke<SavedLiveTranslation[]>("list_live_translations", { id });
+
+/** The live transcript saved with a meeting (ADR-0048). Separate from the final transcript. */
+export const listLiveCaptions = (id: string) =>
+  invoke<SavedLiveCaption[]>("list_live_captions", { id });
 
 // ── イベント ───────────────────────────────────────────────────────────
 

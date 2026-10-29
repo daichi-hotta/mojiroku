@@ -217,7 +217,7 @@ pub(crate) fn insert_recording_and_maybe_enqueue(
     // job is enqueued because the worker may pick the job up immediately.
     mic_offset_ms: Option<i64>,
 ) -> Result<StartJobResult, String> {
-    insert_recording_and_maybe_enqueue_with_translations(
+    insert_recording_and_maybe_enqueue_with_live_history(
         app,
         store,
         queue,
@@ -226,11 +226,14 @@ pub(crate) fn insert_recording_and_maybe_enqueue(
         record_only,
         mic_offset_ms,
         &[],
+        &[],
     )
 }
 
+/// Meetings also save their live translations and live transcript in the same
+/// transaction as the recording row (ADR-0038, ADR-0048).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn insert_recording_and_maybe_enqueue_with_translations(
+pub(crate) fn insert_recording_and_maybe_enqueue_with_live_history(
     app: &AppHandle,
     store: &SqliteStore,
     queue: &crate::jobs::JobQueue,
@@ -239,9 +242,10 @@ pub(crate) fn insert_recording_and_maybe_enqueue_with_translations(
     record_only: bool,
     mic_offset_ms: Option<i64>,
     translations: &[mojiroku_core::store::SavedLiveTranslation],
+    captions: &[mojiroku_core::store::SavedLiveCaption],
 ) -> Result<StartJobResult, String> {
     store
-        .insert_recording_with_translations(recording, translations)
+        .insert_recording_with_live_history(recording, translations, captions)
         .map_err(|e| e.to_string())?;
     if let Some(offset) = mic_offset_ms {
         store
