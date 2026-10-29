@@ -628,7 +628,7 @@ def segment_diagnostics(ops: list[tuple], ref_units: list[Unit], hyp_units: list
         supported = seg_matched[n] >= 0.5 * total
         for phrase in HALLUCINATIONS:
             if phrase in segment["text"]:
-                phrases[phrase]["in_reference" if supported else "not_in_reference"] += 1
+                phrases[phrase][f"{track(segment)}_{'in' if supported else 'not_in'}_reference"] += 1
         previous = segments[n - 1] if n else None
         if previous and previous["text"].strip() == segment["text"].strip() and \
                 previous.get("speaker_id") == segment.get("speaker_id"):
@@ -667,6 +667,8 @@ def segment_diagnostics(ops: list[tuple], ref_units: list[Unit], hyp_units: list
         "reference_cues_missed": {k: dict(v) for k, v in missed.items()},
         "known_hallucination_phrases": {k: dict(v) for k, v in phrases.items()},
         "repeated_previous_segment": dict(duplicates),
+        # Per segment index: (matched chars, scored chars). Used for audio levels, not printed.
+        "_support": {n: (seg_matched[n], seg_total[n]) for n in seg_total},
     }
 
 
@@ -764,6 +766,71 @@ def print_report(result: dict, out=sys.stdout) -> None:
              f"mojiroku speaker {event['mojiroku_speaker']}")
 
 
+# ── audio levels (numbers only) ──────────────────────────────────────────────
+
+def _dbfs(handle, start_ms: float, end_ms: float) -> float | None:
+    import array
+    import math
+
+    rate = handle.getframerate()
+    first = max(int(start_ms * rate / 1000), 0)
+    count = int((end_ms - start_ms) * rate / 1000)
+    if count <= 0 or first >= handle.getnframes():
+        return None
+    handle.setpos(first)
+    samples = array.array("h", handle.readframes(count))
+    if sys.byteorder == "big":
+        samples.byteswap()
+    if not samples:
+        return None
+    power = sum(x * x for x in samples) / len(samples)
+    return 20 * math.log10(max(math.sqrt(power), 1) / 32768)
+
+
+def mic_levels(recordings: Path, recording: dict, segments: list[dict], support: dict) -> dict:
+    """Mic and system loudness during mic ('self') segments, grouped by whether the
+    reference supports the segment. Leaked remote audio or noise is much quieter on the
+    mic than the owner's own voice and coincides with a louder system track."""
+    import wave
+
+    tracks = {label: (path, shift) for path, label, shift in recording_tracks(recordings, recording)}
+    if "self" not in tracks or "system" not in tracks:
+        return {"skipped": "needs both meeting tracks"}
+    groups: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    with wave.open(str(tracks["self"][0])) as mic, wave.open(str(tracks["system"][0])) as system:
+        if mic.getsampwidth() != 2 or system.getsampwidth() != 2:
+            return {"skipped": "expects 16-bit PCM"}
+        for n, segment in enumerate(segments):
+            if segment.get("speaker_id") != "self" or n not in support:
+                continue
+            matched, total = support[n]
+            if matched >= 0.5 * total:
+                group = "supported"
+            elif total >= 4 and matched < 0.3 * total:
+                group = "not_in_reference"
+            else:
+                continue
+            if any(p in segment["text"] for p in HALLUCINATIONS):
+                group = "known_hallucination_phrase"
+            a, b = segment["start_ms"], segment["end_ms"]
+            m = _dbfs(mic, a - tracks["self"][1], b - tracks["self"][1])
+            y = _dbfs(system, a - tracks["system"][1], b - tracks["system"][1])
+            if m is not None and y is not None:
+                groups[group].append((m, y))
+
+    def summary(values: list[float]) -> list[float]:
+        if len(values) < 2:
+            return [round(v, 1) for v in values]
+        q = statistics.quantiles(values, n=4)
+        return [round(q[0], 1), round(statistics.median(values), 1), round(q[2], 1)]
+
+    return {group: {"segments": len(pairs),
+                    "mic_dbfs_q1_median_q3": summary([m for m, _ in pairs]),
+                    "system_dbfs_q1_median_q3": summary([y for _, y in pairs]),
+                    "mic_minus_system_db_q1_median_q3": summary([m - y for m, y in pairs])}
+            for group, pairs in sorted(groups.items())}
+
+
 # ── re-running the pipeline on the saved audio ──────────────────────────────
 
 VARIANTS = {
@@ -853,6 +920,8 @@ def main(argv: list[str] | None = None) -> None:
         command.add_argument("--window-min", type=int, default=5)
         command.add_argument("--no-clip", action="store_true",
                              help="also score mojiroku text outside the reference's time span")
+    sub.choices["saved"].add_argument("--recordings", type=Path,
+                                      help="the app's recordings folder: adds mic/system loudness")
     rerun = sub.choices["rerun"]
     rerun.add_argument("--recordings", type=Path, required=True, help="the app's recordings folder")
     rerun.add_argument("--models", type=Path, required=True, help="the app's models folder")
@@ -884,9 +953,15 @@ def main(argv: list[str] | None = None) -> None:
     print(f"mojiroku hygiene: {report['mojiroku_hygiene']}")
 
     saved = analyse(ref_units, hypothesis_units(segments), args.window_min, segments, cues, not args.no_clip)
+    support = saved["segment_diagnostics"].pop("_support")
     report["comparison"] = saved
     if args.command == "saved":
         print_report(saved)
+        if args.recordings:
+            report["mic_levels"] = mic_levels(args.recordings, recording, segments, support)
+            print("\nMic-track loudness during mic segments (dBFS; q1, median, q3):")
+            for group, value in report["mic_levels"].items():
+                print(f"  {group}: {value}")
     else:
         job_language = next((job["stt_lang"] for job in reversed(rec["jobs"])
                              if job["kind"] == "transcribe" and job.get("stt_lang")), None)
@@ -909,6 +984,7 @@ def main(argv: list[str] | None = None) -> None:
             variant_segments = merged_segments(per_track)
             result = analyse(ref_units, hypothesis_units(variant_segments), args.window_min,
                              variant_segments, cues, not args.no_clip)
+            result["segment_diagnostics"].pop("_support")
             report["variants"][name] = {"pipeline_seconds": seconds, "hygiene": hygiene(variant_segments),
                                         "comparison": result}
             rows.append(summary_row(name, result, seconds))

@@ -178,7 +178,39 @@ class AnalyseTests(unittest.TestCase):
         self.assertEqual(diagnostics["reference_cues_missed"],
                          {"system": {"cues": 1, "chars": 10, "no_mojiroku_segment_then": 1}})
         self.assertEqual(diagnostics["known_hallucination_phrases"],
-                         {"ご視聴ありがとうございました": {"not_in_reference": 1}})
+                         {"ご視聴ありがとうございました": {"system_not_in_reference": 1}})
+
+
+class LevelTests(unittest.TestCase):
+    def write_wav(self, path: Path, loud_spans: list[tuple[int, int, int]], seconds: int = 10):
+        import array
+        import wave
+
+        rate = 16_000
+        samples = array.array("h", [0] * rate * seconds)
+        for start, end, amplitude in loud_spans:
+            for n in range(start * rate // 1000, end * rate // 1000):
+                samples[n] = amplitude if n % 2 else -amplitude
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(rate)
+            handle.writeframes(samples.tobytes())
+
+    def test_mic_levels_group_by_reference_support(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            # Own voice at 1-2 s (loud mic); remote talk at 5-7 s leaks faintly into the mic.
+            # The mic file starts 500 ms later than the merged timeline (positive mic offset).
+            self.write_wav(root / "r-mic.wav", [(500, 1500, 8000), (4500, 6500, 80)])
+            self.write_wav(root / "r-system.wav", [(5000, 7000, 8000)])
+            segments = [{"start_ms": 1000, "end_ms": 2000, "text": "x", "speaker_id": "self"},
+                        {"start_ms": 5000, "end_ms": 7000, "text": "y", "speaker_id": "self"}]
+            recording = {"id": "r", "source_type": "live", "mic_offset_ms": 500}
+            levels = reference.mic_levels(root, recording, segments, {0: (5, 5), 1: (0, 6)})
+        self.assertEqual(levels["supported"]["segments"], 1)
+        self.assertGreater(levels["supported"]["mic_dbfs_q1_median_q3"][0], -13)
+        self.assertLess(levels["not_in_reference"]["mic_minus_system_db_q1_median_q3"][0], -35)
 
 
 class HygieneTests(unittest.TestCase):
