@@ -334,6 +334,14 @@ const en: Dict = {
       "Generates minutes with decisions, action items, and open questions — locally.",
     tabs: {
       transcript: "Transcript",
+      live: "Live transcript",
+    },
+    // The live transcript saved with a meeting (#154, ADR-0048).
+    liveTranscript: {
+      hint: "Captions as shown during the meeting. They have no speakers, can have gaps, and may differ from the final transcript.",
+      empty: "No live transcript was saved for this recording.",
+      unfinished: "Unfinished at Stop",
+      failed: "Could not load the live transcript.",
     },
     noTranscriptTitle: "Not transcribed yet",
     noTranscriptHint: "Use “Transcribe” above to transcribe this recording on this Mac.",

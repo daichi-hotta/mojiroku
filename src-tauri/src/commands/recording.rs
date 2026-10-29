@@ -233,7 +233,14 @@ pub(crate) async fn stop_meeting_recording(
 
     // 0) ライブワーカーを止めて join する（共有バッファを解放し、本番文字起こしが whisper を
     //    ロードする前に Metal/メモリの競合を避ける。advisor）。
-    live_stt::stop(&live);
+    //    Its live transcript is saved with the recording below (ADR-0048).
+    let mut captions = live_stt::stop_and_take(&live);
+    // The worker already keeps captions within the stored limits. If they still do not
+    // validate, save the meeting without them rather than lose the recording.
+    if let Err(e) = mojiroku_core::store::validate_live_captions(&captions) {
+        eprintln!("live transcript not saved (recording is saved): {e}");
+        captions.clear();
+    }
     // 1) 両トラックを停止（spool WAV が finalize される）。片側が落ちても他方で続行する
     //    （録音を丸ごと失わない）。両方とも録れていない場合は下の無音ガードで弾く。
     let sys_info = system_audio::stop(&sys).ok();
@@ -375,7 +382,7 @@ pub(crate) async fn stop_meeting_recording(
         created_at: chrono::Utc::now().to_rfc3339(),
     };
     // 会議は「音声だけ保存」トグルの対象外（常に文字起こしまで積む）ので record_only=false。
-    insert_recording_and_maybe_enqueue_with_translations(
+    insert_recording_and_maybe_enqueue_with_live_history(
         &app,
         &store,
         &queue,
@@ -384,5 +391,6 @@ pub(crate) async fn stop_meeting_recording(
         false,
         mic_offset_ms,
         &translations,
+        &captions,
     )
 }
