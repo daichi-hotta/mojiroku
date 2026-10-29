@@ -19,7 +19,7 @@ use std::{path::PathBuf, sync::Arc};
 use axum::response::IntoResponse;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{ServerCapabilities, ServerInfo},
+    model::{ServerCapabilities, ServerConfig},
     tool, tool_handler, tool_router,
     transport::{
         stdio,
@@ -297,8 +297,8 @@ impl MojirokuMcp {
 
 #[tool_handler]
 impl ServerHandler for MojirokuMcp {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Search and read the user's local mojiroku meeting notes (recording -> transcript \
              -> summaries, with speaker separation). Start with search_meetings to find a \
              meeting, or list_recent_meetings for the latest ones, then pass the recording_id \

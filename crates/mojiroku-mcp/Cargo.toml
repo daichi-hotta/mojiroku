@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 axum = "0.8"
 mojiroku-core = { path = "../mojiroku-core" }
-rmcp = { version = "1.8.0", features = [
+rmcp = { version = "3.8.0", features = [
     "server",
     "transport-io",
     "macros",
