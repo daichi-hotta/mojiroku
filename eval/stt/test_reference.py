@@ -250,6 +250,18 @@ class LevelTests(unittest.TestCase):
         self.assertAlmostEqual(short, 20 * math.log10(8000 / 32768), places=1)
         self.assertAlmostEqual(long, short, places=1)
 
+    def test_frames_line_up_with_the_rust_envelope(self):
+        import wave
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder, "a.wav")
+            self.write_wav(path, [(1000, 1050, 8000)], seconds=3)
+            with wave.open(str(path)) as handle:
+                level = reference._dbfs(handle, 1050, 1500)
+        # Frame 1000-1100 ms holds the burst for half its length; the loudest 300 ms is
+        # frames 10-12, a sixth of the burst's power.
+        self.assertAlmostEqual(level, 20 * math.log10(8000 / 32768) - 10 * math.log10(6), places=1)
+
     def test_stereo_is_averaged_to_mono_first(self):
         import wave
 

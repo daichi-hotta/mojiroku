@@ -781,12 +781,15 @@ def _dbfs(handle, start_ms: float, end_ms: float) -> float | None:
     import math
 
     rate = handle.getframerate()
-    first = max(int(start_ms * rate / 1000), 0)
-    count = int((end_ms - start_ms) * rate / 1000)
-    if count <= 0 or first >= handle.getnframes():
+    frame = max(rate // 10, 1)
+    # The same 100 ms frames as crosstalk::Envelope: counted from the track start, with the
+    # span widened to whole frames.
+    first = max(math.floor(start_ms / 100), 0) * frame
+    last = min(max(math.ceil(end_ms / 100), 0) * frame, handle.getnframes())
+    if first >= last:
         return None
     handle.setpos(first)
-    samples = array.array("h", handle.readframes(count))
+    samples = array.array("h", handle.readframes(last - first))
     if sys.byteorder == "big":
         samples.byteswap()
     channels = handle.getnchannels()
@@ -795,7 +798,6 @@ def _dbfs(handle, start_ms: float, end_ms: float) -> float | None:
                    for frame in zip(*(samples[c::channels] for c in range(channels)))]
     if not samples:
         return None
-    frame = max(rate // 10, 1)
     powers = [sum(x * x for x in samples[i:i + frame]) / len(samples[i:i + frame])
               for i in range(0, len(samples), frame)]
     width = min(3, len(powers))
