@@ -78,6 +78,7 @@ fn main() {
         None
     } else {
         mojiroku_core::crosstalk::filter_mic_track(&mut mic, mic_path, system_path, mic_offset_ms)
+            .expect("crosstalk filter failed")
     };
     let lang = mojiroku_core::lang::Lang::from_code("ja");
     let merge = |mic, system| {

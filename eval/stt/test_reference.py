@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import math
 from pathlib import Path
 import random
 import sqlite3
@@ -56,6 +57,12 @@ class ParseTests(unittest.TestCase):
         self.assertEqual([c["speaker"] for c in cues], ["Alice Smith", "Bob"])
         self.assertEqual(cues[0]["text"], "こんにちは続きです")
         self.assertEqual(cues[0]["end"], cues[1]["start"])
+
+    def test_cues_without_end_times_last_as_long_as_their_text(self):
+        raw = "[A] 00:00:00\nはい\n[B] 00:05:00\n" + "あ" * 400 + "\n"
+        cues, _ = reference.parse_reference(raw)
+        self.assertEqual(cues[0]["end"], 30_000)  # no stretching over the long pause
+        self.assertEqual(cues[1]["end"] - cues[1]["start"], 60_000)  # 400 chars at 150 ms
 
     def test_wall_clock_crossing_midnight_stays_monotonic(self):
         raw = "[A] 23:59:50\nあ\n[B] 00:00:05\nい\n"
@@ -226,6 +233,19 @@ class LevelTests(unittest.TestCase):
         self.assertEqual(levels["supported"]["segments"], 1)
         self.assertGreater(levels["supported"]["mic_dbfs_q1_median_q3"][0], -13)
         self.assertLess(levels["not_in_reference"]["mic_minus_system_db_q1_median_q3"][0], -35)
+
+
+    def test_level_is_the_loudest_300_ms(self):
+        import wave
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder, "a.wav")
+            self.write_wav(path, [(1000, 1500, 8000)])
+            with wave.open(str(path)) as handle:
+                short = reference._dbfs(handle, 1000, 1500)
+                long = reference._dbfs(handle, 0, 8000)
+        self.assertAlmostEqual(short, 20 * math.log10(8000 / 32768), places=1)
+        self.assertAlmostEqual(long, short, places=1)
 
 
 class CrosstalkTests(unittest.TestCase):

@@ -11,10 +11,14 @@
 use std::path::Path;
 
 use crate::schemas::Transcript;
+use crate::Result;
 
 /// 100 ms frames of 16 kHz PCM.
 const FRAME_SAMPLES: usize = 1_600;
 const FRAME_MS: i64 = 100;
+/// A segment's level is its loudest 300 ms, so pauses inside it (a Whisper segment can span
+/// a VAD gap) do not make the owner's speech look quiet.
+const LEVEL_WINDOW_FRAMES: usize = 3;
 
 /// The system track has speech during the segment (dBFS over the segment).
 pub const SYSTEM_ACTIVE_DBFS: f32 = -45.0;
@@ -42,7 +46,8 @@ impl Envelope {
         Self { frames }
     }
 
-    /// Level in dBFS over `[start_ms, end_ms)`, or `None` when that lies outside the audio.
+    /// Level in dBFS of the loudest 300 ms in `[start_ms, end_ms)` (all of it when shorter),
+    /// or `None` when that lies outside the audio.
     pub fn dbfs(&self, start_ms: i64, end_ms: i64) -> Option<f32> {
         let first = (start_ms.max(0) / FRAME_MS) as usize;
         let last = ((end_ms.max(0) + FRAME_MS - 1) / FRAME_MS) as usize;
@@ -50,8 +55,13 @@ impl Envelope {
         if first >= last {
             return None;
         }
-        let mean = self.frames[first..last].iter().sum::<f32>() / (last - first) as f32;
-        Some(10.0 * mean.max(1e-12).log10())
+        let span = &self.frames[first..last];
+        let width = span.len().min(LEVEL_WINDOW_FRAMES);
+        let loudest = span
+            .windows(width)
+            .map(|window| window.iter().sum::<f32>() / width as f32)
+            .fold(0.0, f32::max);
+        Some(10.0 * loudest.max(1e-12).log10())
     }
 }
 
@@ -105,26 +115,34 @@ pub fn drop_mic_crosstalk(
 }
 
 /// Decode both meeting tracks again for their levels and apply [`drop_mic_crosstalk`].
-/// Best effort: a track that cannot be decoded leaves the mic transcript unchanged.
+/// Best effort: a track that cannot be decoded leaves the mic transcript unchanged. Stop is
+/// checked before each decode (ADR-0046).
 pub fn filter_mic_track(
     mic: &mut Transcript,
     mic_path: &Path,
     system_path: &Path,
     mic_offset_ms: i64,
-) -> Option<CrosstalkReport> {
+) -> Result<Option<CrosstalkReport>> {
     if mic.segments.is_empty() {
-        return None;
+        return Ok(None);
     }
     // One track's PCM at a time; only the small envelopes are kept.
-    let envelope = |path: &Path| match crate::audio::decode_to_pcm16k_mono(path) {
-        Ok(pcm) => Some(Envelope::from_pcm(&pcm)),
-        Err(error) => {
-            eprintln!("meeting crosstalk: skipped, could not decode a track: {error}");
-            None
-        }
+    let envelope = |path: &Path| -> Result<Option<Envelope>> {
+        crate::cancel::check()?;
+        Ok(match crate::audio::decode_to_pcm16k_mono(path) {
+            Ok(pcm) => Some(Envelope::from_pcm(&pcm)),
+            Err(error) => {
+                eprintln!("meeting crosstalk: skipped, could not decode a track: {error}");
+                None
+            }
+        })
     };
-    let mic_env = envelope(mic_path)?;
-    let system_env = envelope(system_path)?;
+    let Some(mic_env) = envelope(mic_path)? else {
+        return Ok(None);
+    };
+    let Some(system_env) = envelope(system_path)? else {
+        return Ok(None);
+    };
     let report = drop_mic_crosstalk(mic, &mic_env, &system_env, mic_offset_ms);
     eprintln!(
         "meeting crosstalk: own voice {}, dropped {} of {} mic segments",
@@ -134,7 +152,7 @@ pub fn filter_mic_track(
         report.dropped,
         report.dropped + report.kept,
     );
-    Some(report)
+    Ok(Some(report))
 }
 
 fn is_leak(mic_db: f32, system_db: f32, own_db: f32) -> bool {
@@ -206,7 +224,10 @@ mod tests {
         let env = Envelope::from_pcm(&pcm(2_000, &[(0, 1_000, 0.5)]));
         let loud = env.dbfs(0, 1_000).unwrap();
         assert!((loud - 20.0 * 0.5f32.log10()).abs() < 0.01, "{loud}");
-        assert!((env.dbfs(0, 2_000).unwrap() - (loud - 3.01)).abs() < 0.05);
+        // The loudest 300 ms decides, so trailing silence does not lower the level.
+        assert!((env.dbfs(0, 2_000).unwrap() - loud).abs() < 0.01);
+        // Shorter than 300 ms: the mean over the whole span.
+        assert!((env.dbfs(900, 1_100).unwrap() - (loud - 3.01)).abs() < 0.05);
         assert!(env.dbfs(1_000, 2_000).unwrap() < -100.0);
         assert_eq!(env.dbfs(5_000, 6_000), None);
         assert_eq!(env.dbfs(500, 500), None);
@@ -245,6 +266,31 @@ mod tests {
         assert_eq!(texts(&t), ["0", "2000", "4000", "12000"]);
         assert_eq!((report.dropped, report.kept), (2, 4));
         assert!((report.own_voice_dbfs.unwrap() - 20.0 * OWN.log10()).abs() < 0.1);
+    }
+
+    #[test]
+    fn keeps_a_short_reply_inside_a_long_segment() {
+        // An 8 s mic segment (spanning a VAD gap) holds 0.5 s of the owner's voice while the
+        // remote side talks throughout; the mean over 8 s would look like a leak.
+        let mic = pcm(
+            20_000,
+            &[
+                (0, 1_000, OWN),
+                (2_000, 3_000, OWN),
+                (4_000, 5_000, OWN),
+                (10_000, 10_500, OWN),
+                (10_500, 18_000, LEAK),
+            ],
+        );
+        let system = pcm(20_000, &[(10_000, 18_000, REMOTE)]);
+        let mut t = transcript(&[(0, 1_000), (2_000, 3_000), (4_000, 5_000), (10_000, 18_000)]);
+        let report = drop_mic_crosstalk(
+            &mut t,
+            &Envelope::from_pcm(&mic),
+            &Envelope::from_pcm(&system),
+            0,
+        );
+        assert_eq!(report.dropped, 0);
     }
 
     #[test]

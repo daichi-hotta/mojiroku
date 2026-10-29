@@ -40,9 +40,12 @@ not the owner speaking.
 After both tracks are transcribed and before they are merged
 (`transcribe_meeting_dual_track_with_options`), `crosstalk::filter_mic_track`:
 
-1. Decodes each track again into a 100 ms energy envelope, one track's PCM at a time.
+1. Decodes each track again into a 100 ms energy envelope, one track's PCM at a time, and
+   checks for Stop before each decode (ADR-0046).
 2. Measures each mic segment on the mic track and on the system track at the same moment.
-   Mic time `t` is system time `t + mic_offset_ms`, the convention of `merge_tracks`.
+   A segment's level is its loudest 300 ms: a Whisper segment can span a VAD gap, and a
+   mean over the pause would make a short reply look as quiet as a leak. Mic time `t` is
+   system time `t + mic_offset_ms`, the convention of `merge_tracks`.
 3. Learns the owner's level as the median mic level of mic segments that are at least
    20 dB louder than the system track. With fewer than three such segments, nothing is
    dropped.

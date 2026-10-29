@@ -26,9 +26,10 @@ import sys
 
 from metrics import NORMALIZATION, tokens
 
-REPORT_VERSION = "reference-compare-v1"
+REPORT_VERSION = "reference-compare-v2"
 DP_LIMIT = 1_500_000
 CLIP_MARGIN_MS = 10_000
+CUE_MS_PER_CHAR = 150  # cue length estimate for exports without end times (~7 chars/s)
 ANCHOR_SIZES = (12, 8, 5, 3)
 TIME = r"\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d{1,3})?"
 # Whole edit runs made only of these are fillers/backchannels, not content errors.
@@ -165,8 +166,10 @@ def parse_reference(raw: str) -> tuple[list[dict], str]:
     for previous, cue in zip(cues, cues[1:]):
         while cue["start"] < previous["start"] - 6 * 3600 * 1000:
             cue["start"] += 24 * 3600 * 1000
+    # Without end times a cue lasts until the next one, but not across a long pause: at most
+    # 30 s, or longer when its text needs it at a brisk speaking rate.
     for cue, following in zip(cues, cues[1:] + [None]):
-        limit = cue["start"] + 30_000
+        limit = cue["start"] + max(30_000, CUE_MS_PER_CHAR * len(tokens(cue["text"], "ja")))
         cue["end"] = min(following["start"], limit) if following else limit
     return cues, name
 
@@ -771,6 +774,8 @@ def print_report(result: dict, out=sys.stdout) -> None:
 # ── audio levels (numbers only) ──────────────────────────────────────────────
 
 def _dbfs(handle, start_ms: float, end_ms: float) -> float | None:
+    """Level of the loudest 300 ms in the span (all of it when shorter), as crosstalk.rs
+    measures it, so a pause inside a segment does not lower it."""
     import array
     import math
 
@@ -785,7 +790,11 @@ def _dbfs(handle, start_ms: float, end_ms: float) -> float | None:
         samples.byteswap()
     if not samples:
         return None
-    power = sum(x * x for x in samples) / len(samples)
+    frame = max(rate // 10, 1)
+    powers = [sum(x * x for x in samples[i:i + frame]) / len(samples[i:i + frame])
+              for i in range(0, len(samples), frame)]
+    width = min(3, len(powers))
+    power = max(sum(powers[i:i + width]) / width for i in range(len(powers) - width + 1))
     return 20 * math.log10(max(math.sqrt(power), 1) / 32768)
 
 
