@@ -203,7 +203,8 @@ class AnalyseTests(unittest.TestCase):
 
 
 class LevelTests(unittest.TestCase):
-    def write_wav(self, path: Path, loud_spans: list[tuple[int, int, int]], seconds: int = 10):
+    def write_wav(self, path: Path, loud_spans: list[tuple[int, int, int]], seconds: int = 10,
+                  channels: int = 1):
         import array
         import wave
 
@@ -212,8 +213,10 @@ class LevelTests(unittest.TestCase):
         for start, end, amplitude in loud_spans:
             for n in range(start * rate // 1000, end * rate // 1000):
                 samples[n] = amplitude if n % 2 else -amplitude
+        # Extra channels are silent, so the averaged level is lower by 20·log10(channels).
+        samples = array.array("h", [x if c == 0 else 0 for x in samples for c in range(channels)])
         with wave.open(str(path), "wb") as handle:
-            handle.setnchannels(1)
+            handle.setnchannels(channels)
             handle.setsampwidth(2)
             handle.setframerate(rate)
             handle.writeframes(samples.tobytes())
@@ -246,6 +249,17 @@ class LevelTests(unittest.TestCase):
                 long = reference._dbfs(handle, 0, 8000)
         self.assertAlmostEqual(short, 20 * math.log10(8000 / 32768), places=1)
         self.assertAlmostEqual(long, short, places=1)
+
+    def test_stereo_is_averaged_to_mono_first(self):
+        import wave
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder, "a.wav")
+            self.write_wav(path, [(1000, 1150, 8000)], seconds=3, channels=2)
+            with wave.open(str(path)) as handle:
+                level = reference._dbfs(handle, 0, 3000)
+        # 150 ms of a half-amplitude mono signal inside the loudest 300 ms window.
+        self.assertAlmostEqual(level, 20 * math.log10(4000 / 32768) - 3.01, places=1)
 
 
 class CrosstalkTests(unittest.TestCase):

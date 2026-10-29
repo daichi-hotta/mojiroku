@@ -775,7 +775,8 @@ def print_report(result: dict, out=sys.stdout) -> None:
 
 def _dbfs(handle, start_ms: float, end_ms: float) -> float | None:
     """Level of the loudest 300 ms in the span (all of it when shorter), as crosstalk.rs
-    measures it, so a pause inside a segment does not lower it."""
+    measures it, so a pause inside a segment does not lower it. Channels are averaged
+    first, like decode_to_pcm16k_mono."""
     import array
     import math
 
@@ -788,6 +789,10 @@ def _dbfs(handle, start_ms: float, end_ms: float) -> float | None:
     samples = array.array("h", handle.readframes(count))
     if sys.byteorder == "big":
         samples.byteswap()
+    channels = handle.getnchannels()
+    if channels > 1:
+        samples = [sum(frame) / channels
+                   for frame in zip(*(samples[c::channels] for c in range(channels)))]
     if not samples:
         return None
     frame = max(rate // 10, 1)
