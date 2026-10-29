@@ -787,48 +787,98 @@ def _dbfs(handle, start_ms: float, end_ms: float) -> float | None:
     return 20 * math.log10(max(math.sqrt(power), 1) / 32768)
 
 
-def mic_levels(recordings: Path, recording: dict, segments: list[dict], support: dict) -> dict:
-    """Mic and system loudness during mic ('self') segments, grouped by whether the
-    reference supports the segment. Leaked remote audio or noise is much quieter on the
-    mic than the owner's own voice and coincides with a louder system track."""
+def segment_levels(recordings: Path, recording: dict, segments: list[dict]) -> dict[int, tuple[float, float]]:
+    """Mic and system dBFS over each mic ('self') segment, in the tracks' own time."""
     import wave
 
     tracks = {label: (path, shift) for path, label, shift in recording_tracks(recordings, recording)}
     if "self" not in tracks or "system" not in tracks:
-        return {"skipped": "needs both meeting tracks"}
-    groups: dict[str, list[tuple[float, float]]] = defaultdict(list)
+        return {}
+    levels = {}
     with wave.open(str(tracks["self"][0])) as mic, wave.open(str(tracks["system"][0])) as system:
         if mic.getsampwidth() != 2 or system.getsampwidth() != 2:
-            return {"skipped": "expects 16-bit PCM"}
+            return {}
         for n, segment in enumerate(segments):
-            if segment.get("speaker_id") != "self" or n not in support:
+            if segment.get("speaker_id") != "self":
                 continue
-            matched, total = support[n]
-            if matched >= 0.5 * total:
-                group = "supported"
-            elif total >= 4 and matched < 0.3 * total:
-                group = "not_in_reference"
-            else:
-                continue
-            if any(p in segment["text"] for p in HALLUCINATIONS):
-                group = "known_hallucination_phrase"
             a, b = segment["start_ms"], segment["end_ms"]
             m = _dbfs(mic, a - tracks["self"][1], b - tracks["self"][1])
             y = _dbfs(system, a - tracks["system"][1], b - tracks["system"][1])
             if m is not None and y is not None:
-                groups[group].append((m, y))
+                levels[n] = (m, y)
+    return levels
 
-    def summary(values: list[float]) -> list[float]:
-        if len(values) < 2:
-            return [round(v, 1) for v in values]
-        q = statistics.quantiles(values, n=4)
-        return [round(q[0], 1), round(statistics.median(values), 1), round(q[2], 1)]
 
+def support_group(segment: dict, support: dict, n: int) -> str | None:
+    if n not in support:
+        return None
+    matched, total = support[n]
+    if any(p in segment["text"] for p in HALLUCINATIONS) and matched < 0.5 * total:
+        return "known_hallucination_phrase"
+    if matched >= 0.5 * total:
+        return "supported"
+    if total >= 4 and matched < 0.3 * total:
+        return "not_in_reference"
+    return "partly"
+
+
+def _quartiles(values: list[float]) -> list[float]:
+    if len(values) < 2:
+        return [round(v, 1) for v in values]
+    q = statistics.quantiles(values, n=4)
+    return [round(q[0], 1), round(statistics.median(values), 1), round(q[2], 1)]
+
+
+def mic_levels(levels: dict, segments: list[dict], support: dict) -> dict:
+    """Group mic-segment loudness by reference support. Leaked remote audio is much
+    quieter on the mic than the owner's own voice and coincides with system speech."""
+    groups: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for n, (m, y) in levels.items():
+        group = support_group(segments[n], support, n)
+        if group:
+            groups[group].append((m, y))
     return {group: {"segments": len(pairs),
-                    "mic_dbfs_q1_median_q3": summary([m for m, _ in pairs]),
-                    "system_dbfs_q1_median_q3": summary([y for _, y in pairs]),
-                    "mic_minus_system_db_q1_median_q3": summary([m - y for m, y in pairs])}
+                    "mic_dbfs_q1_median_q3": _quartiles([m for m, _ in pairs]),
+                    "system_dbfs_q1_median_q3": _quartiles([y for _, y in pairs]),
+                    "mic_minus_system_db_q1_median_q3": _quartiles([m - y for m, y in pairs]),
+                    "mic_minus_system_db_min": round(min(m - y for m, y in pairs), 1)}
             for group, pairs in sorted(groups.items())}
+
+
+CROSSTALK_RULES = [
+    # (system active above dBFS, mic below system by dB, mic below own voice by dB)
+    (-45.0, 0.0, 6.0), (-45.0, 0.0, 10.0), (-45.0, 0.0, 15.0),
+    (-45.0, -6.0, 10.0), (-45.0, 6.0, 10.0), (-45.0, 10.0, 10.0),
+]
+
+
+def own_voice_db(levels: dict) -> float | None:
+    """Median mic level of segments where the system track is clearly quieter."""
+    own = [m for m, y in levels.values() if m - y >= 20]
+    return statistics.median(own) if len(own) >= 3 else None
+
+
+def crosstalk_simulation(levels: dict, segments: list[dict], support: dict, ref_units: list[Unit],
+                         cues: list[dict], window_min: int, clip: bool) -> dict:
+    """What dropping leaked mic segments would do to the score, for a few thresholds."""
+    own = own_voice_db(levels)
+    if own is None:
+        return {"skipped": "fewer than 3 clear own-voice mic segments"}
+    out = {"own_voice_dbfs": round(own, 1), "rules": []}
+    for active, below_system, below_own in CROSSTALK_RULES:
+        drop = {n for n, (m, y) in levels.items()
+                if y > active and m < y - below_system and m < own - below_own}
+        dropped = Counter(support_group(segments[n], support, n) or "outside_scored_span" for n in drop)
+        kept = [seg for n, seg in enumerate(segments) if n not in drop]
+        result = analyse(ref_units, hypothesis_units(kept), window_min, kept, cues, clip)
+        out["rules"].append({
+            "rule": f"system > {active:g} dBFS, mic < system - {below_system:g} dB, mic < own - {below_own:g} dB",
+            "dropped_segments": dict(dropped),
+            "dropped_chars": sum(len(tokens(segments[n]["text"], "ja")) for n in drop),
+            "cer": result["cer"], "substitutions": result["substitutions"],
+            "deletions": result["deletions"], "insertions": result["insertions"],
+        })
+    return out
 
 
 # ── re-running the pipeline on the saved audio ──────────────────────────────
@@ -958,10 +1008,18 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "saved":
         print_report(saved)
         if args.recordings:
-            report["mic_levels"] = mic_levels(args.recordings, recording, segments, support)
+            levels = segment_levels(args.recordings, recording, segments)
+            report["mic_levels"] = mic_levels(levels, segments, support)
             print("\nMic-track loudness during mic segments (dBFS; q1, median, q3):")
             for group, value in report["mic_levels"].items():
                 print(f"  {group}: {value}")
+            report["crosstalk_simulation"] = crosstalk_simulation(
+                levels, segments, support, ref_units, cues, args.window_min, not args.no_clip)
+            print("\nDropping mic segments that look like leaked system audio (simulation):")
+            simulation = report["crosstalk_simulation"]
+            print(f"  own voice level: {simulation.get('own_voice_dbfs', simulation.get('skipped'))} dBFS")
+            for rule in simulation.get("rules", []):
+                print(f"  {rule}")
     else:
         job_language = next((job["stt_lang"] for job in reversed(rec["jobs"])
                              if job["kind"] == "transcribe" and job.get("stt_lang")), None)

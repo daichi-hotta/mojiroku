@@ -207,10 +207,35 @@ class LevelTests(unittest.TestCase):
             segments = [{"start_ms": 1000, "end_ms": 2000, "text": "x", "speaker_id": "self"},
                         {"start_ms": 5000, "end_ms": 7000, "text": "y", "speaker_id": "self"}]
             recording = {"id": "r", "source_type": "live", "mic_offset_ms": 500}
-            levels = reference.mic_levels(root, recording, segments, {0: (5, 5), 1: (0, 6)})
+            per_segment = reference.segment_levels(root, recording, segments)
+            levels = reference.mic_levels(per_segment, segments, {0: (5, 5), 1: (0, 6)})
         self.assertEqual(levels["supported"]["segments"], 1)
         self.assertGreater(levels["supported"]["mic_dbfs_q1_median_q3"][0], -13)
         self.assertLess(levels["not_in_reference"]["mic_minus_system_db_q1_median_q3"][0], -35)
+
+
+class CrosstalkTests(unittest.TestCase):
+    def test_simulation_drops_quiet_mic_text_during_remote_speech(self):
+        cues = [{"start": 0, "end": 3000, "speaker": "A", "text": "あいうえおかきくけこ"},
+                {"start": 3000, "end": 6000, "speaker": "A", "text": "あいうえおかきくけこ"},
+                {"start": 10_000, "end": 13_000, "speaker": "B", "text": "さしすせそたちつてと"},
+                {"start": 20_000, "end": 23_000, "speaker": "B", "text": "なにぬねのはひふへほ"}]
+        segments = [
+            {"start_ms": 0, "end_ms": 6000, "text": "あいうえおかきくけこあいうえおかきくけこ", "speaker_id": "S1"},
+            {"start_ms": 2000, "end_ms": 4000, "text": "ご視聴ありがとうございました", "speaker_id": "self"},
+            {"start_ms": 10_000, "end_ms": 13_000, "text": "さしすせそたちつてと", "speaker_id": "self"},
+            {"start_ms": 20_000, "end_ms": 23_000, "text": "なにぬねのはひふへほ", "speaker_id": "self"},
+            {"start_ms": 30_000, "end_ms": 33_000, "text": "まみむめも", "speaker_id": "self"},
+        ]
+        levels = {1: (-50.0, -25.0), 2: (-24.0, -90.0), 3: (-23.0, -88.0), 4: (-25.0, -90.0)}
+        ref_units, _ = reference.reference_units(cues)
+        support = reference.analyse(ref_units, reference.hypothesis_units(segments),
+                                    segments=segments, cues=cues, clip=False)["segment_diagnostics"]["_support"]
+        result = reference.crosstalk_simulation(levels, segments, support, ref_units, cues, 5, False)
+        self.assertEqual(result["own_voice_dbfs"], -24.0)
+        first = result["rules"][0]
+        self.assertEqual(first["dropped_segments"], {"known_hallucination_phrase": 1})
+        self.assertEqual(first["insertions"], 5)  # only the unsupported まみむめも remains
 
 
 class HygieneTests(unittest.TestCase):
