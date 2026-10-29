@@ -181,6 +181,19 @@ class AnalyseTests(unittest.TestCase):
         unclipped = reference.analyse(ref, hyp, clip=False)
         self.assertEqual(unclipped["errors"], 30)
 
+    def test_reference_speech_before_the_recording_is_not_scored(self):
+        # The meeting tool started 5 minutes before mojiroku: 30 reference characters
+        # come from before the recording.
+        ref = (reference.spread("たちつてと" * 6, 0, 20_000, "R1", 0)
+               + reference.spread("あいうえおかきくけこさしすせそ", 300_000, 310_000, "R1", 1))
+        hyp = reference.spread("あいうえおかきくけこさしすせそ", 0, 10_000, "S1", 0)
+        result = reference.analyse(ref, hyp, recording_ms=60_000)
+        self.assertEqual((result["errors"], result["reference_chars_outside_recording"]), (0, 30))
+        # A miss inside the recording still counts.
+        ref_late = ref + reference.spread("なにぬねの", 340_000, 342_000, "R1", 2)
+        self.assertEqual(reference.analyse(ref_late, hyp, recording_ms=60_000)["errors"], 5)
+        self.assertEqual(reference.analyse(ref, hyp, clip=False)["errors"], 30)
+
     def test_segment_diagnostics(self):
         cues = [{"start": 0, "end": 4000, "speaker": "A", "text": "来週の打ち合わせは水曜日にしましょう"},
                 {"start": 10_000, "end": 13_000, "speaker": "B", "text": "資料をすぐに送ります"}]
@@ -305,6 +318,11 @@ class CrosstalkTests(unittest.TestCase):
         first = result["rules"][0]
         self.assertEqual(first["dropped_segments"], {"known_hallucination_phrase": 1})
         self.assertEqual(first["insertions"], 5)  # only the unsupported まみむめも remains
+
+
+    def test_simulation_says_why_without_levels(self):
+        result = reference.crosstalk_simulation({}, [], {}, [], [], 5, False)
+        self.assertIn("two-track", result["skipped"])
 
 
 class HygieneTests(unittest.TestCase):

@@ -473,19 +473,27 @@ def _median_offset(ops: list[tuple], ref_units: list[Unit], hyp_units: list[Unit
 
 
 def analyse(ref_units: list[Unit], hyp_units: list[Unit], window_min: int = 5,
-            segments: list[dict] | None = None, cues: list[dict] | None = None, clip: bool = True) -> dict:
+            segments: list[dict] | None = None, cues: list[dict] | None = None, clip: bool = True,
+            recording_ms: int | None = None) -> dict:
     ref = "".join(u.char for u in ref_units)
     if not ref:
         raise SystemExit("reference has no characters after normalisation")
     # Score only the time both transcripts cover: an export that stops early must not count
-    # the rest of the recording as invented text. The first pass finds the clock offset.
+    # the rest of the recording as invented text, and reference speech from before the
+    # recording started or after it stopped must not count as missed. The first pass finds
+    # the clock offset.
     outside: Counter = Counter()
+    ref_outside = 0
     if clip and hyp_units:
         first_ops, _ = align(ref, "".join(u.char for u in hyp_units))
         first = _median_offset(first_ops, ref_units, hyp_units)
         if first:
             shift = statistics.median(first)
             lo, hi = ref_units[0].ms - CLIP_MARGIN_MS, ref_units[-1].ms + CLIP_MARGIN_MS
+            # The recording in reference time; its text span when the length is unknown.
+            start, end = ((0, recording_ms) if recording_ms
+                          else (min(u.ms for u in hyp_units), max(u.ms for u in hyp_units)))
+            rec_lo, rec_hi = start + shift - CLIP_MARGIN_MS, end + shift + CLIP_MARGIN_MS
             kept = []
             for unit in hyp_units:
                 if lo <= unit.ms + shift <= hi:
@@ -493,6 +501,11 @@ def analyse(ref_units: list[Unit], hyp_units: list[Unit], window_min: int = 5,
                 else:
                     outside[unit.speaker] += 1
             hyp_units = kept
+            kept_ref = [unit for unit in ref_units if rec_lo <= unit.ms <= rec_hi]
+            if kept_ref:
+                ref_outside = len(ref_units) - len(kept_ref)
+                ref_units = kept_ref
+                ref = "".join(u.char for u in ref_units)
     hyp = "".join(u.char for u in hyp_units)
     ops, unaligned = align(ref, hyp)
     counts = Counter(op for op, _, _ in ops)
@@ -578,6 +591,7 @@ def analyse(ref_units: list[Unit], hyp_units: list[Unit], window_min: int = 5,
         "reference_chars": len(ref),
         "mojiroku_chars": len(hyp),
         "mojiroku_chars_outside_reference_span": dict(outside),
+        "reference_chars_outside_recording": ref_outside,
         "segment_diagnostics": diagnostics,
         "errors": errors,
         "cer": rate(errors, len(ref)),
@@ -733,6 +747,9 @@ def print_report(result: dict, out=sys.stdout) -> None:
     if result["mojiroku_chars_outside_reference_span"]:
         line(f"Not scored (mojiroku text outside the reference's time span): "
              f"{result['mojiroku_chars_outside_reference_span']}")
+    if result["reference_chars_outside_recording"]:
+        line(f"Not scored (reference text outside the recording): "
+             f"{result['reference_chars_outside_recording']} chars")
     line(f"CER {pct(result['cer'])}  (S {result['substitutions']:,} / D {result['deletions']:,} / "
          f"I {result['insertions']:,})  without filler runs {pct(result['cer_without_filler_runs'])}")
     if result["unaligned_units"]:
@@ -877,8 +894,11 @@ def own_voice_db(levels: dict) -> float | None:
 
 
 def crosstalk_simulation(levels: dict, segments: list[dict], support: dict, ref_units: list[Unit],
-                         cues: list[dict], window_min: int, clip: bool) -> dict:
+                         cues: list[dict], window_min: int, clip: bool,
+                         recording_ms: int | None = None) -> dict:
     """What dropping leaked mic segments would do to the score, for a few thresholds."""
+    if not levels:
+        return {"skipped": "no levels: needs a two-track recording with both 16-bit WAV files"}
     own = own_voice_db(levels)
     if own is None:
         return {"skipped": "fewer than 3 clear own-voice mic segments"}
@@ -888,7 +908,7 @@ def crosstalk_simulation(levels: dict, segments: list[dict], support: dict, ref_
                 if y > active and m < y - below_system and m < own - below_own}
         dropped = Counter(support_group(segments[n], support, n) or "outside_scored_span" for n in drop)
         kept = [seg for n, seg in enumerate(segments) if n not in drop]
-        result = analyse(ref_units, hypothesis_units(kept), window_min, kept, cues, clip)
+        result = analyse(ref_units, hypothesis_units(kept), window_min, kept, cues, clip, recording_ms)
         out["rules"].append({
             "rule": f"system > {active:g} dBFS, mic < system - {below_system:g} dB, mic < own - {below_own:g} dB",
             "dropped_segments": dict(dropped),
@@ -1013,7 +1033,7 @@ def main(argv: list[str] | None = None) -> None:
         command.add_argument("--json-out", type=Path, help="also write the aggregate report as JSON")
         command.add_argument("--window-min", type=int, default=5)
         command.add_argument("--no-clip", action="store_true",
-                             help="also score mojiroku text outside the reference's time span")
+                             help="also score text outside the time both transcripts cover")
     sub.choices["saved"].add_argument("--recordings", type=Path,
                                       help="the app's recordings folder: adds mic/system loudness")
     rerun = sub.choices["rerun"]
@@ -1050,7 +1070,9 @@ def main(argv: list[str] | None = None) -> None:
           f"mic offset {rec['mic_offset_ms']} ms, jobs {rec['jobs']}")
     print(f"mojiroku hygiene: {report['mojiroku_hygiene']}")
 
-    saved = analyse(ref_units, hypothesis_units(segments), args.window_min, segments, cues, not args.no_clip)
+    recording_ms = recording.get("duration_ms")
+    saved = analyse(ref_units, hypothesis_units(segments), args.window_min, segments, cues,
+                    not args.no_clip, recording_ms)
     support = saved["segment_diagnostics"].pop("_support")
     report["comparison"] = saved
     if args.command == "saved":
@@ -1062,10 +1084,14 @@ def main(argv: list[str] | None = None) -> None:
             for group, value in report["mic_levels"].items():
                 print(f"  {group}: {value}")
             report["crosstalk_simulation"] = crosstalk_simulation(
-                levels, segments, support, ref_units, cues, args.window_min, not args.no_clip)
+                levels, segments, support, ref_units, cues, args.window_min, not args.no_clip,
+                recording_ms)
             print("\nDropping mic segments that look like leaked system audio (simulation):")
             simulation = report["crosstalk_simulation"]
-            print(f"  own voice level: {simulation.get('own_voice_dbfs', simulation.get('skipped'))} dBFS")
+            if "skipped" in simulation:
+                print(f"  skipped: {simulation['skipped']}")
+            else:
+                print(f"  own voice level: {simulation['own_voice_dbfs']} dBFS")
             for rule in simulation.get("rules", []):
                 print(f"  {rule}")
     else:
@@ -1088,7 +1114,7 @@ def main(argv: list[str] | None = None) -> None:
                     args.meeting_binary, tracks, recording.get("mic_offset_ms") or 0, args.models,
                     language, decoder, model, args.extra_arg, args.timeout)
                 baseline = analyse(ref_units, hypothesis_units(unfiltered), args.window_min,
-                                   unfiltered, cues, not args.no_clip)
+                                   unfiltered, cues, not args.no_clip, recording_ms)
                 baseline["segment_diagnostics"].pop("_support")
                 report["variants"][f"{name}-unfiltered"] = {
                     "pipeline_seconds": seconds, "hygiene": hygiene(unfiltered), "comparison": baseline}
@@ -1103,7 +1129,7 @@ def main(argv: list[str] | None = None) -> None:
                     seconds += took
                 variant_segments = merged_segments(per_track)
             result = analyse(ref_units, hypothesis_units(variant_segments), args.window_min,
-                             variant_segments, cues, not args.no_clip)
+                             variant_segments, cues, not args.no_clip, recording_ms)
             result["segment_diagnostics"].pop("_support")
             report["variants"][name] = {"pipeline_seconds": seconds, "hygiene": hygiene(variant_segments),
                                         "crosstalk": crosstalk, "comparison": result}

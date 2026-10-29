@@ -212,9 +212,10 @@ python3 eval/stt/reference.py rerun --db "$APP/mojiroku.db" --reference ~/Downlo
 
 - The reference is usually another automatic transcript. Treat CER as disagreement, and
   read the categories: fillers and kana/kanji spelling differ by style, not accuracy.
-- Only the time span the reference covers is scored. The clock offset comes from matched
-  characters, so wall-clock exports (13:02:11) and relative ones both work. `--no-clip`
-  scores everything.
+- Only the time both cover is scored: mojiroku text after the export stops, and reference
+  text from before the recording started or after it stopped, are left out and counted.
+  The clock offset comes from matched characters, so wall-clock exports (13:02:11) and
+  relative ones both work. `--no-clip` scores everything.
 - Alignment uses unique character n-gram anchors and exact edit distance between them, so
   a one-hour meeting aligns in well under a second. The count is an upper bound on the true
   edit distance; `unaligned_units` reports anything no anchor could place.
