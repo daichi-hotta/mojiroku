@@ -1,4 +1,4 @@
-# ADR-0048: Drop meeting mic segments that are leaked remote audio
+# ADR-0049: Drop meeting mic segments that are leaked remote audio
 
 - Date: 2026-10-29
 - Status: Accepted

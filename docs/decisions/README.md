@@ -70,4 +70,4 @@
 - [ADR-0045: Follow the macOS appearance with one token set](ADR-0045_Follow_the_macOS_appearance_with_one_token_set.md)
 - [ADR-0046: Cancel running jobs cooperatively](ADR-0046_Cancel_running_jobs_cooperatively.md)
 - [ADR-0047: Auto-title recordings locally after transcription](ADR-0047_Auto-title_recordings_locally_after_transcription.md)
-- [ADR-0048: Drop meeting mic segments that are leaked remote audio](ADR-0048_Drop_meeting_mic_segments_that_are_leaked_remote_audio.md)
+- [ADR-0049: Drop meeting mic segments that are leaked remote audio](ADR-0049_Drop_meeting_mic_segments_that_are_leaked_remote_audio.md)

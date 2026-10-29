@@ -1,5 +1,5 @@
 //! Meeting crosstalk: drop microphone segments that only contain the other participants
-//! leaking into the microphone (ADR-0048).
+//! leaking into the microphone (ADR-0049).
 //!
 //! With speakers instead of headphones, the mic track also hears the remote side, far more
 //! quietly than the owner's own voice. VAD rightly keeps it (it is speech), and Whisper turns

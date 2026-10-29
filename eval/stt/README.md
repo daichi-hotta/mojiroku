@@ -203,7 +203,7 @@ APP="$HOME/Library/Application Support/com.daichi0812.mojiroku"
 # The saved transcript (read-only DB), plus loudness and a crosstalk simulation:
 python3 eval/stt/reference.py saved --db "$APP/mojiroku.db" --reference ~/Downloads/meeting.vtt \
   --title "<recording title>" --recordings "$APP/recordings"
-# Fresh runs on the saved audio, filtered and unfiltered (ADR-0048) from one call each:
+# Fresh runs on the saved audio, filtered and unfiltered (ADR-0049) from one call each:
 cargo build --release -p mojiroku-core --example meeting_cli
 python3 eval/stt/reference.py rerun --db "$APP/mojiroku.db" --reference ~/Downloads/meeting.vtt \
   --title "<recording title>" --recordings "$APP/recordings" --models "$APP/models" \

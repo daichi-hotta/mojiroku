@@ -1,5 +1,5 @@
 //! Evaluation CLI for two-track meetings: STT on the mic and system tracks, the mic crosstalk
-//! filter (ADR-0048), then the product's track merge. Speaker separation is skipped: the text
+//! filter (ADR-0049), then the product's track merge. Speaker separation is skipped: the text
 //! and the crosstalk decision do not depend on it, and it would double the run time.
 //! Usage: meeting_cli <mic.wav> <system.wav> <models_dir> <lang|auto|mixed> <mic_offset_ms>
 //!        [default|greedy|beam5] [--model <catalog-file>]

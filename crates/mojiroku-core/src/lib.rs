@@ -382,7 +382,7 @@ pub fn transcribe_meeting_dual_track_with_options(
     let mut mic = transcribe_file_impl(mic_path, models_dir, options, on_progress, false)?;
     cancel::check()?;
     // Remote voices leaking into the mic (speakers instead of headphones) come back as faint
-    // duplicate or invented mic text; drop those segments before merging (ADR-0048).
+    // duplicate or invented mic text; drop those segments before merging (ADR-0049).
     if !system.segments.is_empty() {
         crosstalk::filter_mic_track(&mut mic, mic_path, system_path, mic_offset_ms);
         cancel::check()?;
