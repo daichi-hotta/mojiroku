@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 axum = "0.8"
 mojiroku-core = { path = "../mojiroku-core" }
-rmcp = { version = "1.8.0", features = [
+rmcp = { version = "3.8.0", features = [
     "server",
     "transport-io",
     "macros",
@@ -24,3 +24,8 @@ serde_json = "1.0.150"
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
+
+[dev-dependencies]
+# tests/smoke.rs: 実バイナリを stdio / HTTP で叩く。どちらも既に依存グラフに居る版。
+tempfile = "3"
+ureq = { version = "2", default-features = false }
