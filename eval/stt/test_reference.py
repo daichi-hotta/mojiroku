@@ -349,6 +349,42 @@ class EndToEndTests(unittest.TestCase):
             # The 120 ms mic offset shifts the mic track like merge_tracks does.
             self.assertEqual(set(variant["comparison"]["speaker_overlap_chars"]["R1"]), {"system"})
 
+    def test_rerun_with_meeting_binary_reports_crosstalk(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            db, ref = root / "m.db", root / "z.vtt"
+            self.make_db(db)
+            ref.write_text("WEBVTT\n\n00:00:00.000 --> 00:00:05.000\nA: はい、よろしくお願いします\n\n"
+                           "00:00:05.000 --> 00:00:06.000\nA: はい\n", encoding="utf-8")
+            recordings, models = root / "recordings", root / "models"
+            recordings.mkdir()
+            models.mkdir()
+            for name in ("r1-mic.wav", "r1-system.wav"):
+                (recordings / name).write_bytes(b"")
+            (models / "ggml-large-v3-turbo-q5_0.bin").write_bytes(b"")
+            fake = root / "meeting_cli"
+            fake.write_text(
+                f"#!{sys.executable}\n"
+                "import json, sys\n"
+                "assert sys.argv[1].endswith('-mic.wav') and sys.argv[2].endswith('-system.wav')\n"
+                "assert sys.argv[5] == '120' and sys.argv[6] == 'greedy'\n"
+                "segs = [{'start_ms': 0, 'end_ms': 5000, 'text': 'はい、よろしくお願いします', 'speaker_id': None}]\n"
+                "raw = segs + [{'start_ms': 4000, 'end_ms': 4500, 'text': 'ご視聴ありがとうございました', 'speaker_id': 'self'}]\n"
+                "print(json.dumps({'transcript': {'segments': segs}, 'unfiltered_transcript': {'segments': raw},\n"
+                "                  'pipeline_seconds': 2.0,\n"
+                "                  'crosstalk': {'own_voice_dbfs': -24.0, 'dropped': 3, 'kept': 9}}))\n",
+                encoding="utf-8")
+            fake.chmod(0o755)
+            argv = ["rerun", "--db", str(db), "--reference", str(ref), "--recording-id", "r1",
+                    "--recordings", str(recordings), "--models", str(models), "--meeting-binary", str(fake),
+                    "--variants", "turbo-greedy"]
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                reference.main(argv)
+            self.assertIn("crosstalk dropped 3", buffer.getvalue())
+            self.assertIn("turbo-greedy-unfiltered", buffer.getvalue())
+            self.assertNotIn("よろしく", buffer.getvalue())
+
     def test_unmatched_title_does_not_list_other_titles(self):
         with tempfile.TemporaryDirectory() as folder:
             db = Path(folder, "m.db")

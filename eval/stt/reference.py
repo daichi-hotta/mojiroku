@@ -924,6 +924,32 @@ def transcribe(binary: Path, audio: Path, models: Path, language: str, decoder: 
     return payload["transcript"]["segments"], float(payload["pipeline_seconds"])
 
 
+def transcribe_meeting(binary: Path, tracks: list[tuple[Path, str, int]], offset: int, models: Path,
+                       language: str, decoder: str, model: str, extra: list[str],
+                       timeout: float) -> tuple[list[dict], list[dict], float, dict | None]:
+    """meeting_cli: both tracks, the crosstalk filter and the product merge in one call.
+    Returns the filtered and the unfiltered merge of the same Whisper output."""
+    import subprocess
+
+    paths = {label: path for path, label, _ in tracks}
+    if set(paths) != {"self", "system"}:
+        raise SystemExit("--meeting-binary needs both meeting tracks")
+    completed = subprocess.run(
+        [str(binary), str(paths["self"]), str(paths["system"]), str(models), language, str(offset),
+         decoder, "--model", model, *extra],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
+    if completed.returncode != 0:
+        raise SystemExit(f"meeting_cli exited {completed.returncode}")
+    payload = json.loads(completed.stdout)
+
+    def labelled(key: str) -> list[dict]:
+        return [{**segment, "speaker_id": segment.get("speaker_id") or "system"}
+                for segment in payload[key]["segments"]]
+
+    return (labelled("transcript"), labelled("unfiltered_transcript"),
+            float(payload["pipeline_seconds"]), payload.get("crosstalk"))
+
+
 def merged_segments(per_track: list[tuple[list[dict], str, int]]) -> list[dict]:
     segments = []
     for track_segments, speaker, shift in per_track:
@@ -975,7 +1001,9 @@ def main(argv: list[str] | None = None) -> None:
     rerun = sub.choices["rerun"]
     rerun.add_argument("--recordings", type=Path, required=True, help="the app's recordings folder")
     rerun.add_argument("--models", type=Path, required=True, help="the app's models folder")
-    rerun.add_argument("--binary", type=Path, required=True, help="transcribe_cli built from this checkout")
+    rerun.add_argument("--binary", type=Path, help="transcribe_cli built from this checkout (per track)")
+    rerun.add_argument("--meeting-binary", type=Path,
+                       help="meeting_cli: both tracks + crosstalk filter + merge in one call")
     rerun.add_argument("--variants", default="turbo-greedy,turbo-beam5,full-greedy")
     rerun.add_argument("--language", help="ja, en, auto or mixed (default: the recording's job setting)")
     rerun.add_argument("--extra-arg", action="append", default=[],
@@ -984,6 +1012,8 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if not (args.title or args.recording_id):
         parser.error("pass --title or --recording-id")
+    if args.command == "rerun" and not (args.binary or args.meeting_binary):
+        parser.error("pass --binary or --meeting-binary")
 
     cues, form, ref_units, speakers, recording, segments = load_inputs(args)
     report = {
@@ -1033,19 +1063,33 @@ def main(argv: list[str] | None = None) -> None:
             if not (args.models / model).exists():
                 rows.append(f"  {name:<22} skipped: {model} is not downloaded")
                 continue
-            per_track, seconds = [], 0.0
-            for audio, speaker, shift in tracks:
-                track_segments, took = transcribe(args.binary, audio, args.models, language, decoder,
-                                                  model, args.extra_arg, args.timeout)
-                per_track.append((track_segments, speaker, shift))
-                seconds += took
-            variant_segments = merged_segments(per_track)
+            crosstalk = None
+            if args.meeting_binary:
+                variant_segments, unfiltered, seconds, crosstalk = transcribe_meeting(
+                    args.meeting_binary, tracks, recording.get("mic_offset_ms") or 0, args.models,
+                    language, decoder, model, args.extra_arg, args.timeout)
+                baseline = analyse(ref_units, hypothesis_units(unfiltered), args.window_min,
+                                   unfiltered, cues, not args.no_clip)
+                baseline["segment_diagnostics"].pop("_support")
+                report["variants"][f"{name}-unfiltered"] = {
+                    "pipeline_seconds": seconds, "hygiene": hygiene(unfiltered), "comparison": baseline}
+                rows.append(summary_row(f"{name}-unfiltered", baseline, None))
+                print(rows[-1], flush=True)
+            else:
+                per_track, seconds = [], 0.0
+                for audio, speaker, shift in tracks:
+                    track_segments, took = transcribe(args.binary, audio, args.models, language, decoder,
+                                                      model, args.extra_arg, args.timeout)
+                    per_track.append((track_segments, speaker, shift))
+                    seconds += took
+                variant_segments = merged_segments(per_track)
             result = analyse(ref_units, hypothesis_units(variant_segments), args.window_min,
                              variant_segments, cues, not args.no_clip)
             result["segment_diagnostics"].pop("_support")
             report["variants"][name] = {"pipeline_seconds": seconds, "hygiene": hygiene(variant_segments),
-                                        "comparison": result}
-            rows.append(summary_row(name, result, seconds))
+                                        "crosstalk": crosstalk, "comparison": result}
+            rows.append(summary_row(name, result, seconds)
+                        + (f"  crosstalk dropped {crosstalk['dropped']}" if crosstalk else ""))
             print(rows[-1], flush=True)
         print("\nSummary (reference = the exported transcript):")
         print("\n".join(rows))
