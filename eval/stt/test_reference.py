@@ -30,6 +30,11 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(cues[2]["text"], "時間: 十時")
         self.assertEqual(cues[0]["start"], 1000)
 
+    def test_vtt_entities_are_decoded(self):
+        raw = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n<i>Q&amp;A</i> &lt;3\n"
+        cues, _ = reference.parse_reference(raw)
+        self.assertEqual(cues[0]["text"], "Q&A <3")
+
     def test_single_colon_prefix_is_text(self):
         raw = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n議題: 予算\n"
         cues, _ = reference.parse_reference(raw)

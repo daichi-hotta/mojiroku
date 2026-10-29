@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import html
 from collections import Counter, defaultdict
 import json
 from pathlib import Path
@@ -127,7 +128,7 @@ def parse_reference(raw: str) -> tuple[list[dict], str]:
             match = cue_line.match(lines[at])
             body = " ".join(lines[at + 1:])
             prefix, text = _split_speaker(body)
-            text = re.sub(r"<[^>]+>", "", text)
+            text = html.unescape(re.sub(r"<[^>]+>", "", text))  # WebVTT escapes & and <
             cues.append({"start": parse_time(match.group(1)), "end": parse_time(match.group(2)),
                          "prefix": prefix, "text": text})
         return _accept_speakers(cues), "vtt/srt"
