@@ -149,16 +149,17 @@ def parse_reference(raw: str) -> tuple[list[dict], str]:
             groups = match.groupdict()
             cues.append({"start": parse_time(groups["time"]), "end": None,
                          "speaker": (groups.get("speaker") or "").strip() or None,
-                         "text": groups.get("text") or ""})
+                         "text": groups.get("text") or "", "prefix": None})
         elif cues:
             body = line
-            if name == "time-only":
-                speaker, body = _split_speaker(line)
-                if speaker and not cues[-1]["text"]:
-                    cues[-1]["speaker"] = speaker
+            if name == "time-only" and not cues[-1]["text"]:
+                # Only a cue's first line can name its speaker; _accept_speakers decides.
+                cues[-1]["prefix"], body = _split_speaker(line)
             cues[-1]["text"] += body
     if not cues:
         return [], "unknown"
+    if name == "time-only":
+        cues = _accept_speakers(cues)
     # Wall-clock exports (for example 13:02:11) can cross midnight; keep them monotonic.
     for previous, cue in zip(cues, cues[1:]):
         while cue["start"] < previous["start"] - 6 * 3600 * 1000:
@@ -1051,9 +1052,10 @@ def main(argv: list[str] | None = None) -> None:
             for rule in simulation.get("rules", []):
                 print(f"  {rule}")
     else:
-        job_language = next((job["stt_lang"] for job in reversed(rec["jobs"])
-                             if job["kind"] == "transcribe" and job.get("stt_lang")), None)
-        language = args.language or job_language or "auto"
+        # The newest finished transcription decides; a null stt_lang there means auto.
+        last_job = next((job for job in reversed(rec["jobs"])
+                         if job["kind"] == "transcribe" and job["status"] == "done"), {})
+        language = args.language or last_job.get("stt_lang") or "auto"
         tracks = recording_tracks(args.recordings, recording)
         print(f"Re-running {len(tracks)} track(s), language {language}, extra args {args.extra_arg}")
         rows = [summary_row("saved in app", saved, None)]

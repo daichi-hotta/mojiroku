@@ -35,6 +35,17 @@ class ParseTests(unittest.TestCase):
         self.assertIsNone(cues[0]["speaker"])
         self.assertEqual(cues[0]["text"], "議題:予算")
 
+    def test_time_only_keeps_colons_inside_text(self):
+        raw = ("00:01:02\nアリス: 議題: 予算\n10:00から再開\n00:01:10\nボブ: はい\n"
+               "00:01:20\nアリス: どうも\n00:01:30\nボブ: 了解\n")
+        cues, form = reference.parse_reference(raw)
+        self.assertEqual(form, "time-only")
+        self.assertEqual([c["speaker"] for c in cues], ["アリス", "ボブ", "アリス", "ボブ"])
+        self.assertEqual(cues[0]["text"], "議題: 予算10:00から再開")
+        cues, _ = reference.parse_reference("00:00:01\n議題: 予算\n00:00:05\n次は 10:00から\n")
+        self.assertEqual([c["speaker"] for c in cues], [None, None])
+        self.assertEqual([c["text"] for c in cues], ["議題:予算", "次は 10:00から"])
+
     def test_bracket_name_time_txt(self):
         raw = "[Alice Smith] 13:02:11\nこんにちは\n続きです\n[Bob] 13:02:20\nはい\n"
         cues, form = reference.parse_reference(raw)
@@ -354,6 +365,15 @@ class EndToEndTests(unittest.TestCase):
             root = Path(folder)
             db, ref = root / "m.db", root / "z.vtt"
             self.make_db(db)
+            # The newest finished transcription used auto; an earlier ja job and a later failed
+            # job must not decide the rerun language.
+            conn = sqlite3.connect(db)
+            conn.execute("INSERT INTO jobs VALUES ('j2','r1','transcribe','done',?, 'y')",
+                         (json.dumps({"stt_lang": None}),))
+            conn.execute("INSERT INTO jobs VALUES ('j3','r1','transcribe','failed',?, 'z')",
+                         (json.dumps({"stt_lang": "en"}),))
+            conn.commit()
+            conn.close()
             ref.write_text("WEBVTT\n\n00:00:00.000 --> 00:00:05.000\nA: はい、よろしくお願いします\n\n"
                            "00:00:05.000 --> 00:00:06.000\nA: はい\n", encoding="utf-8")
             recordings, models = root / "recordings", root / "models"
@@ -367,7 +387,7 @@ class EndToEndTests(unittest.TestCase):
                 f"#!{sys.executable}\n"
                 "import json, sys\n"
                 "assert sys.argv[1].endswith('-mic.wav') and sys.argv[2].endswith('-system.wav')\n"
-                "assert sys.argv[5] == '120' and sys.argv[6] == 'greedy'\n"
+                "assert sys.argv[4] == 'auto' and sys.argv[5] == '120' and sys.argv[6] == 'greedy'\n"
                 "segs = [{'start_ms': 0, 'end_ms': 5000, 'text': 'はい、よろしくお願いします', 'speaker_id': None}]\n"
                 "raw = segs + [{'start_ms': 4000, 'end_ms': 4500, 'text': 'ご視聴ありがとうございました', 'speaker_id': 'self'}]\n"
                 "print(json.dumps({'transcript': {'segments': segs}, 'unfiltered_transcript': {'segments': raw},\n"
