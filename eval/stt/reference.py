@@ -1086,7 +1086,9 @@ def main(argv: list[str] | None = None) -> None:
             report["crosstalk_simulation"] = crosstalk_simulation(
                 levels, segments, support, ref_units, cues, args.window_min, not args.no_clip,
                 recording_ms)
-            print("\nDropping mic segments that look like leaked system audio (simulation):")
+            print("\nDropping mic segments that look like leaked system audio (simulation; a saved "
+                  "transcript from after ADR-0049 is already filtered, so use rerun --meeting-binary "
+                  "for the filter's effect there):")
             simulation = report["crosstalk_simulation"]
             if "skipped" in simulation:
                 print(f"  skipped: {simulation['skipped']}")

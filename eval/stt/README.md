@@ -200,7 +200,9 @@ line number. Use it on confidential meetings without opening them.
 
 ```bash
 APP="$HOME/Library/Application Support/com.daichi0812.mojiroku"
-# The saved transcript (read-only DB), plus loudness and a crosstalk simulation:
+# The saved transcript (read-only DB), plus loudness and a crosstalk simulation. The app
+# already drops leaked mic segments since ADR-0049, so the simulation only shows the
+# filter's effect on meetings transcribed before it; use the rerun below for newer ones.
 python3 eval/stt/reference.py saved --db "$APP/mojiroku.db" --reference ~/Downloads/meeting.vtt \
   --title "<recording title>" --recordings "$APP/recordings"
 # Fresh runs on the saved audio, filtered and unfiltered (ADR-0049) from one call each:
