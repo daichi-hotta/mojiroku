@@ -207,6 +207,7 @@ function App() {
       toast(t.job.canceledToast, "info");
     } else if (u.status === "done") {
       toast(u.kind === "diarize" ? t.job.diarizeCompleted : t.job.transcribeCompleted, "success");
+      if (u.unmapped_corrections) toast(t.job.correctionsUnmapped(u.unmapped_corrections), "info");
     } else if (u.status === "failed") {
       // 詳細画面がこのジョブを表示しているなら、そちらの赤枠（再試行つき）だけにする（#107）。
       if (!isJobShown(u.job_id)) {

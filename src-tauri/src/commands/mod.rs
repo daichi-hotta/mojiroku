@@ -53,6 +53,8 @@ pub(crate) struct JobUpdate {
     pub total: Option<u64>,
     /// 失敗時のキー化メッセージ（`translateError` 対象）。それ以外は None。
     pub error: Option<String>,
+    /// 話者分離のやり直しで引き継げなかった手動訂正の数（done のときだけ。ADR-0048）。
+    pub unmapped_corrections: Option<usize>,
 }
 
 /// `job://update` を emit する薄いヘルパ。失敗は無視（進捗表示は best-effort）。
@@ -300,6 +302,7 @@ pub(crate) fn job_progress_callback(
                 done,
                 total,
                 error: None,
+                unmapped_corrections: None,
             },
         );
     }

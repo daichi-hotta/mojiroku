@@ -250,6 +250,8 @@ const en: Dict = {
     cancel: "Stop",
     transcribeCompleted: "Transcription complete",
     diarizeCompleted: "Speaker separation complete",
+    correctionsUnmapped: (n: number) =>
+      `${n} line${n === 1 ? "" : "s"} you corrected could not be matched to a speaker and ${n === 1 ? "is" : "are"} now marked "?"`,
     failedToast: "Processing failed",
     stages: {
       queued: "Queued",
@@ -349,7 +351,7 @@ const en: Dict = {
     runDiarizeDesc: "Analyze who spoke and assign it to the transcript afterwards.",
     rerunDiarize: "Redetect speakers",
     rerunDiarizeDesc:
-      "Analyze the speakers again. Names you gave are kept when the voice matches. In meetings, your own lines stay as they are.",
+      "Analyze the speakers again. Names you gave are kept when the voice matches, and so are lines you corrected. In meetings, your own lines stay as they are.",
     summaryStale: "May be out of date",
     summaryStaleTitle: "The transcript or speakers were updated. Regenerating is recommended.",
     aiCreate: "Create with AI",

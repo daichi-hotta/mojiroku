@@ -143,9 +143,13 @@ async fn run_one_job(app: &AppHandle, job: Job) {
         Err(JOB_CANCELED.to_string())
     } else {
         match kind.as_str() {
-            "transcribe" => run_transcribe(app, &job, Arc::clone(&cancel)).await,
+            "transcribe" => run_transcribe(app, &job, Arc::clone(&cancel))
+                .await
+                .map(|()| JobOutcome::default()),
             "diarize" => run_diarize(app, &job, Arc::clone(&cancel)).await,
-            TITLE_JOB_KIND => run_title(app, &job, Arc::clone(&cancel)).await,
+            TITLE_JOB_KIND => run_title(app, &job, Arc::clone(&cancel))
+                .await
+                .map(|()| JobOutcome::default()),
             other => Err(format!("error.job.unknown_kind: {other}")),
         }
     };
@@ -155,11 +159,17 @@ async fn run_one_job(app: &AppHandle, job: Job) {
     // 結果を終端状態へ書き戻す（running のまま残さない＝再起動時の無限リトライを防ぐ）。
     let store = app.state::<SqliteStore>();
     match result {
-        Ok(()) => {
+        Ok(outcome) => {
             if let Err(e) = store.set_job_done(&job_id) {
                 eprintln!("[jobs] set_job_done 失敗: {e}");
             }
-            emit_lifecycle(app, &job_id, &recording_id, &kind, "done", None, None);
+            emit_job_update(
+                app,
+                &JobUpdate {
+                    unmapped_corrections: outcome.unmapped_corrections,
+                    ..lifecycle_update(&job_id, &recording_id, &kind, "done", None, None)
+                },
+            );
         }
         // 中断（Issue #114）。本文は書き換えていない（保存は処理の最後）ので、録音は元の状態のまま。
         Err(msg) if msg == JOB_CANCELED => {
@@ -186,6 +196,13 @@ async fn run_one_job(app: &AppHandle, job: Job) {
     }
 }
 
+/// 成功したジョブが UI に伝えること。
+#[derive(Default)]
+struct JobOutcome {
+    /// 話者分離のやり直しで引き継げず、未割当に戻した手動訂正の数（ADR-0048）。
+    unmapped_corrections: Option<usize>,
+}
+
 /// ライフサイクル更新（進捗 done/total を伴わない status 遷移）を emit する薄いヘルパ。
 fn emit_lifecycle(
     app: &AppHandle,
@@ -198,17 +215,29 @@ fn emit_lifecycle(
 ) {
     emit_job_update(
         app,
-        &JobUpdate {
-            job_id: job_id.to_string(),
-            recording_id: recording_id.to_string(),
-            kind: kind.to_string(),
-            status: status.to_string(),
-            stage: stage.map(str::to_string),
-            done: 0,
-            total: None,
-            error: error.map(str::to_string),
-        },
+        &lifecycle_update(job_id, recording_id, kind, status, stage, error),
     );
+}
+
+fn lifecycle_update(
+    job_id: &str,
+    recording_id: &str,
+    kind: &str,
+    status: &str,
+    stage: Option<&str>,
+    error: Option<&str>,
+) -> JobUpdate {
+    JobUpdate {
+        job_id: job_id.to_string(),
+        recording_id: recording_id.to_string(),
+        kind: kind.to_string(),
+        status: status.to_string(),
+        stage: stage.map(str::to_string),
+        done: 0,
+        total: None,
+        error: error.map(str::to_string),
+        unmapped_corrections: None,
+    }
 }
 
 // ── 実処理 ────────────────────────────────────────────────────────────────────
@@ -387,7 +416,11 @@ async fn run_title(app: &AppHandle, job: &Job, cancel: Arc<AtomicBool>) -> Resul
 
 /// 後付け（再）話者分離ジョブ。既存本文に新しい話者割当をマージし、旧表示名を声紋 cosine で
 /// ベスト努力引き継ぎして `replace_speaker_assignments` で差し替える（要約は stale マーク）。
-async fn run_diarize(app: &AppHandle, job: &Job, cancel: Arc<AtomicBool>) -> Result<(), String> {
+async fn run_diarize(
+    app: &AppHandle,
+    job: &Job,
+    cancel: Arc<AtomicBool>,
+) -> Result<JobOutcome, String> {
     use mojiroku_core::SourceType;
 
     let id = job.recording_id.clone();
@@ -395,7 +428,15 @@ async fn run_diarize(app: &AppHandle, job: &Job, cancel: Arc<AtomicBool>) -> Res
     let rec_dir = resolve_recordings_dir(app)?;
 
     // 既存の本文・source_type・旧話者/声紋を読む（軽い。await をまたがない）。
-    let (mut transcript, source_type, old_pairs, self_speaker, mic_offset_ms, had_speakers) = {
+    let (
+        mut transcript,
+        source_type,
+        old_pairs,
+        self_speaker,
+        mic_offset_ms,
+        had_speakers,
+        corrections,
+    ) = {
         let store = app.state::<SqliteStore>();
         let detail = store
             .get_recording_detail(&id)
@@ -432,6 +473,7 @@ async fn run_diarize(app: &AppHandle, job: &Job, cancel: Arc<AtomicBool>) -> Res
             .speakers
             .iter()
             .any(|sp| sp.id != mojiroku_core::merge::SELF_SPEAKER_ID);
+        let corrections = store.speaker_corrections(&id).map_err(|e| e.to_string())?;
         (
             detail.transcript,
             detail.recording.source_type,
@@ -439,8 +481,15 @@ async fn run_diarize(app: &AppHandle, job: &Job, cancel: Arc<AtomicBool>) -> Res
             self_speaker,
             offset,
             had_speakers,
+            corrections,
         )
     };
+    // 付け直す前の話者。手で直した発言の話者を新しい id へ引き継ぐ手がかり（ADR-0048）。
+    let previous: Vec<Option<String>> = transcript
+        .segments
+        .iter()
+        .map(|s| s.speaker_id.clone())
+        .collect();
 
     // 対象音声を解決。会議（Live）は **system（相手）トラックだけ**を分離し直す（Issue #102）。
     // mic（自分）のセグメントは `self` のまま触らない。以前は全 transcript へ merge すると自分の
@@ -522,6 +571,18 @@ async fn run_diarize(app: &AppHandle, job: &Job, cancel: Arc<AtomicBool>) -> Res
         &new_pairs,
         CARRY_DISPLAY_NAME_MIN_COS,
     );
+    // 手で直した発言は黙って捨てない。引き継げないものは未割当に戻して件数を知らせる（ADR-0048）。
+    let voice_matches = mojiroku_core::diarization::match_speaker_ids(
+        &old_pairs,
+        &new_pairs,
+        CARRY_DISPLAY_NAME_MIN_COS,
+    );
+    let carried = mojiroku_core::correction::carry_corrections(
+        &corrections,
+        &previous,
+        &mut transcript,
+        &voice_matches,
+    );
 
     let store = app.state::<SqliteStore>();
     store
@@ -532,9 +593,12 @@ async fn run_diarize(app: &AppHandle, job: &Job, cancel: Arc<AtomicBool>) -> Res
             &diar.embeddings,
             mojiroku_core::models::DEFAULT_DIAR_EMB_MODEL,
             &remap,
+            &carried.corrections,
         )
         .map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(JobOutcome {
+        unmapped_corrections: (carried.unmapped > 0).then_some(carried.unmapped),
+    })
 }
 
 /// 文字起こし対象トラックの構成。

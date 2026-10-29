@@ -70,3 +70,4 @@
 - [ADR-0045: Follow the macOS appearance with one token set](ADR-0045_Follow_the_macOS_appearance_with_one_token_set.md)
 - [ADR-0046: Cancel running jobs cooperatively](ADR-0046_Cancel_running_jobs_cooperatively.md)
 - [ADR-0047: Auto-title recordings locally after transcription](ADR-0047_Auto-title_recordings_locally_after_transcription.md)
+- [ADR-0048: Carry speaker corrections over a re-run](ADR-0048_Carry_speaker_corrections_over_a_re-run.md)
