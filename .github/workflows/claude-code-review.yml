@@ -11,11 +11,12 @@
 # and unzip; the action installs Bun and Claude Code. On a self-hosted runner each job gets a
 # fresh HOME under RUNNER_TEMP, as on ubuntu-latest, so no ~/.claude from an earlier review,
 # another repository or a parallel job reaches this one. The runner holds no personal Claude,
-# gh or SSH credentials, but a job runs as the runner's user and can read the runner's own
-# registration files, its private key included. Claude's only output is the PR comment, and
-# runners serve private repositories only; if a key ever appears in a comment, remove that
-# runner and register it again. While no runner is online, the job waits in the queue for up
-# to 24 h and posts nothing. Deleting the variable sends the next run back to ubuntu-latest.
+# gh or SSH credentials, but a job runs as the runner's user and can read the registration
+# files, private keys included, of every runner of that user. Claude's only output is the PR
+# comment, and runners serve private repositories only; if a key ever appears in a comment,
+# remove every runner of that user and register them again. While no runner is online, the
+# job waits in the queue for up to 24 h and posts nothing. Deleting the variable sends the
+# next run back to ubuntu-latest.
 # Never register a self-hosted runner to a public repository (mojiroku): a fork PR runs its
 # own copy of this file and can name the runner directly, whatever the variable says.
 #
