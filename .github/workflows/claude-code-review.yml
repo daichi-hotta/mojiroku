@@ -5,15 +5,19 @@
 #
 # Runner: the job runs on ubuntu-latest unless the repository variable REVIEW_RUNS_ON holds a
 # JSON label list, such as ["self-hosted","ci-runner"] for Daichi's self-hosted runners
-# (shape-polydisperse-granular-dev docs/compute-and-storage.md). Those use no Actions minutes;
-# by 2026-11-18 the account had used 2,702 of its 3,000 monthly minutes, about three quarters
-# on reviews. The runner needs git, gh, curl and unzip; the action installs Bun and Claude
-# Code. On a self-hosted runner each job gets a fresh HOME under RUNNER_TEMP, as on
-# ubuntu-latest, so no ~/.claude from an earlier review, another repository or a parallel job
-# reaches this one; the runner holds no personal Claude, gh or SSH credentials. Deleting the
-# variable sends the next run back to ubuntu-latest. Never register a self-hosted runner to a
-# public repository (mojiroku): a fork PR runs its own copy of this file and can name the
-# runner directly, whatever the variable says.
+# (shape-polydisperse-granular-dev docs/compute-and-storage.md); a bare label fails before any
+# step runs. Those runners use no Actions minutes; by 2026-11-18 the account had used 2,702 of
+# its 3,000 monthly minutes, about three quarters on reviews. The runner needs git, gh, curl
+# and unzip; the action installs Bun and Claude Code. On a self-hosted runner each job gets a
+# fresh HOME under RUNNER_TEMP, as on ubuntu-latest, so no ~/.claude from an earlier review,
+# another repository or a parallel job reaches this one. The runner holds no personal Claude,
+# gh or SSH credentials, but a job runs as the runner's user and can read the runner's own
+# registration files, its private key included. Claude's only output is the PR comment, and
+# runners serve private repositories only; if a key ever appears in a comment, remove that
+# runner and register it again. While no runner is online, the job waits in the queue for up
+# to 24 h and posts nothing. Deleting the variable sends the next run back to ubuntu-latest.
+# Never register a self-hosted runner to a public repository (mojiroku): a fork PR runs its
+# own copy of this file and can name the runner directly, whatever the variable says.
 #
 # Design (each point answers a failure of the earlier setup, removed or replaced on 2026-10-22):
 #   - Claude only reads and returns JSON (--json-schema). The last step posts the result.
