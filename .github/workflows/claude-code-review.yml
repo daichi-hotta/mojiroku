@@ -178,6 +178,27 @@ jobs:
             fs.mkdirSync('.claude-review', { recursive: true });
             fs.writeFileSync('.claude-review/context.md', text);
 
+      # git diff, git log and git show accept --output=<file>, which writes wherever the job's user
+      # can. On a self-hosted runner that file outlives the job (the runner user's ~/.bashrc, say),
+      # so the git that Claude's allowed commands run refuses the option in any position.
+      - name: Refuse git --output during the review
+        run: |
+          set -euo pipefail
+          real_git=$(command -v git)
+          mkdir -p "$RUNNER_TEMP/review-bin"
+          cat > "$RUNNER_TEMP/review-bin/git" <<EOF
+          #!/bin/sh
+          for arg in "\$@"; do
+            case "\$arg" in
+              --output-indicator-*) ;;
+              --out|--out=*|--outp*) echo "git: --output is disabled in the review job" >&2; exit 1 ;;
+            esac
+          done
+          exec "$real_git" "\$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/review-bin/git"
+          echo "$RUNNER_TEMP/review-bin" >> "$GITHUB_PATH"
+
       - name: Review with Claude
         id: claude
         if: steps.context.outputs.stale != 'true'
