@@ -4,9 +4,9 @@
 # Change all three together. Background and measurements: daichi-hotta/ops#61.
 #
 # Runner: the job runs on ubuntu-latest unless the repository variable REVIEW_RUNS_ON holds a
-# JSON label list, such as ["self-hosted","home-win"] for the runners in home-win's gh-runner
-# WSL distro. Those use no Actions minutes, which ran out on 2026-11-18 (reviews were about
-# three quarters of them). The runner needs git, gh and unzip; the action installs Bun and
+# JSON label list, such as ["self-hosted","ci-runner"] for Daichi's self-hosted runners
+# (shape-polydisperse-granular-dev docs/compute-and-storage.md). Those use no Actions minutes,
+# which ran out on 2026-11-18 (reviews were about three quarters of them). The runner needs git, gh and unzip; the action installs Bun and
 # Claude Code. Deleting the variable sends the next run back to ubuntu-latest. A public
 # repository (mojiroku) leaves it unset: its minutes are free, and a self-hosted runner there
 # would run fork PRs from anyone.
