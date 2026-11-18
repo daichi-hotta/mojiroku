@@ -217,7 +217,7 @@ jobs:
             - If the new code fixes one, put its id into resolved_prior: the bracketed text at the start of its line in context.md, such as c1234567890 or u1a2b3c4d.
 
             Output
-            - path is relative to the repository root. line is the line number in the head version, confirmed with Read, or with `git show HEAD:<path>` for the rules and settings files whose BASE copies are in the working tree. Pick a line inside the diff (an added line or a nearby context line). Use start_line for a multi-line range.
+            - path is relative to the repository root. line is the line number in the head version, confirmed with Read, or with `git blame HEAD -- <path>` for the rules and settings files whose BASE copies are in the working tree. Pick a line inside the diff (an added line or a nearby context line). Use start_line for a multi-line range.
             - title: one short sentence naming the problem.
             - replaces: only for a finding you report again (see Earlier findings), the id of the earlier one.
             - body: what goes wrong (a concrete input or sequence), why, and how to fix it. Three to six sentences. Quote the rule when citing AGENTS.md or CLAUDE.md.
