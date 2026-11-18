@@ -5,11 +5,15 @@
 #
 # Runner: the job runs on ubuntu-latest unless the repository variable REVIEW_RUNS_ON holds a
 # JSON label list, such as ["self-hosted","ci-runner"] for Daichi's self-hosted runners
-# (shape-polydisperse-granular-dev docs/compute-and-storage.md). Those use no Actions minutes,
-# which ran out on 2026-11-18 (reviews were about three quarters of them). The runner needs git, gh and unzip; the action installs Bun and
-# Claude Code. Deleting the variable sends the next run back to ubuntu-latest. A public
-# repository (mojiroku) leaves it unset: its minutes are free, and a self-hosted runner there
-# would run fork PRs from anyone.
+# (shape-polydisperse-granular-dev docs/compute-and-storage.md). Those use no Actions minutes;
+# by 2026-11-18 the account had used 2,702 of its 3,000 monthly minutes, about three quarters
+# on reviews. The runner needs git, gh, curl and unzip; the action installs Bun and Claude
+# Code. On a self-hosted runner each job gets a fresh HOME under RUNNER_TEMP, as on
+# ubuntu-latest, so no ~/.claude from an earlier review, another repository or a parallel job
+# reaches this one; the runner holds no personal Claude, gh or SSH credentials. Deleting the
+# variable sends the next run back to ubuntu-latest. Never register a self-hosted runner to a
+# public repository (mojiroku): a fork PR runs its own copy of this file and can name the
+# runner directly, whatever the variable says.
 #
 # Design (each point answers a failure of the earlier setup, removed or replaced on 2026-10-22):
 #   - Claude only reads and returns JSON (--json-schema). The last step posts the result.
@@ -71,6 +75,13 @@ jobs:
       pull-requests: write # the last step posts the review with GITHUB_TOKEN
       issues: write # the summary is a PR conversation comment
     steps:
+      # A self-hosted runner keeps its user's home between jobs (see Runner above).
+      - name: Use a fresh home directory on a self-hosted runner
+        if: runner.environment == 'self-hosted'
+        run: |
+          mkdir -p "$RUNNER_TEMP/home"
+          echo "HOME=$RUNNER_TEMP/home" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}
