@@ -3,6 +3,19 @@
 # This file is identical in mojiroku, babyloop-dev and shape-polydisperse-granular-dev.
 # Change all three together. Background and measurements: daichi-hotta/ops#61.
 #
+# Runner: the job runs on ubuntu-latest unless the repository variable REVIEW_RUNS_ON holds a
+# JSON label list, such as ["self-hosted","ci-runner"] for Daichi's self-hosted runners
+# (shape-polydisperse-granular-dev docs/compute-and-storage.md); a bare label fails before any
+# step runs. Deleting the variable sends the next run back to ubuntu-latest. While no runner is
+# online, the job waits in the queue for up to 24 h and posts nothing; a runner lost mid-job (a
+# restart, say) leaves only the red check, without the "did not finish" summary. The runner
+# needs git, gh, curl and unzip; the action installs Bun and Claude Code. On a self-hosted
+# runner each job gets a fresh HOME under RUNNER_TEMP, so no ~/.claude from another job reaches
+# this one. A job can read the registration keys of every runner of its user; if one ever
+# appears in a review comment, remove all of that user's runners and register them again.
+# Never register a self-hosted runner to a public repository (mojiroku): a fork PR runs its
+# own copy of this file and can name the runner directly, whatever the variable says.
+#
 # Design (each point answers a failure of the earlier setup, removed or replaced on 2026-10-22):
 #   - Claude only reads and returns JSON (--json-schema). The last step posts the result.
 #     The earlier code-review plugin posted by itself and often posted nothing: it skipped
@@ -56,13 +69,20 @@ concurrency:
 jobs:
   review:
     if: github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.REVIEW_RUNS_ON || '"ubuntu-latest"') }}
     timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write # the last step posts the review with GITHUB_TOKEN
       issues: write # the summary is a PR conversation comment
     steps:
+      # A self-hosted runner keeps its user's home between jobs (see Runner above).
+      - name: Use a fresh home directory on a self-hosted runner
+        if: runner.environment == 'self-hosted'
+        run: |
+          mkdir -p "$RUNNER_TEMP/home"
+          echo "HOME=$RUNNER_TEMP/home" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -153,6 +173,27 @@ jobs:
             ].join('\n');
             fs.mkdirSync('.claude-review', { recursive: true });
             fs.writeFileSync('.claude-review/context.md', text);
+
+      # git diff, git log and git show accept --output=<file>, which writes wherever the job's user
+      # can. On a self-hosted runner that file outlives the job (the runner user's ~/.bashrc, say),
+      # so the git that Claude's allowed commands run refuses the option in any position.
+      - name: Refuse git --output during the review
+        run: |
+          set -euo pipefail
+          real_git=$(command -v git)
+          mkdir -p "$RUNNER_TEMP/review-bin"
+          cat > "$RUNNER_TEMP/review-bin/git" <<EOF
+          #!/bin/sh
+          for arg in "\$@"; do
+            case "\$arg" in
+              --output-indicator-*) ;;
+              --out|--out=*|--outp*) echo "git: --output is disabled in the review job" >&2; exit 1 ;;
+            esac
+          done
+          exec "$real_git" "\$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/review-bin/git"
+          echo "$RUNNER_TEMP/review-bin" >> "$GITHUB_PATH"
 
       - name: Review with Claude
         id: claude
