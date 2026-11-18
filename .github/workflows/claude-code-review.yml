@@ -3,6 +3,14 @@
 # This file is identical in mojiroku, babyloop-dev and shape-polydisperse-granular-dev.
 # Change all three together. Background and measurements: daichi-hotta/ops#61.
 #
+# Runner: the job runs on ubuntu-latest unless the repository variable REVIEW_RUNS_ON holds a
+# JSON label list, such as ["self-hosted","home-win"] for the runners in home-win's gh-runner
+# WSL distro. Those use no Actions minutes, which ran out on 2026-11-18 (reviews were about
+# three quarters of them). The runner needs git, gh and unzip; the action installs Bun and
+# Claude Code. Deleting the variable sends the next run back to ubuntu-latest. A public
+# repository (mojiroku) leaves it unset: its minutes are free, and a self-hosted runner there
+# would run fork PRs from anyone.
+#
 # Design (each point answers a failure of the earlier setup, removed or replaced on 2026-10-22):
 #   - Claude only reads and returns JSON (--json-schema). The last step posts the result.
 #     The earlier code-review plugin posted by itself and often posted nothing: it skipped
@@ -56,7 +64,7 @@ concurrency:
 jobs:
   review:
     if: github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.REVIEW_RUNS_ON || '"ubuntu-latest"') }}
     timeout-minutes: 30
     permissions:
       contents: read
