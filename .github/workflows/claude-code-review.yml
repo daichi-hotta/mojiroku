@@ -25,9 +25,12 @@
 #   - Actions are pinned to commit SHAs. On 2026-09-13 a floating @v1 broke every run.
 #   - Claude Code loads AGENTS.md, CLAUDE.md, .claude/ and .mcp.json from the working tree as its
 #     instructions and settings. A step puts the base branch's copies there before the review, so
-#     a PR cannot loosen the rules or settings it is reviewed by unless it also edits this file,
-#     which runs from the PR (pull_request). Claude reads the PR's copies with git show HEAD:<path>
-#     and checks an edit to them against the base rules (2026-11-18).
+#     a PR that edits its rules is reviewed by the base rules. Claude reads the PR's copies with
+#     git show HEAD:<path> and checks an edit to them against the base rules (2026-11-18).
+#     This covers ordinary edits, not a deliberate bypass: the review runs only for same-repository
+#     PRs, and such a PR can edit this file, which runs from the PR (pull_request), or plant other
+#     files the step does not list (a symlinked .claude-review, .gitattributes). Three review
+#     rounds kept finding such paths (mojiroku#157), so the step does not try to close them.
 #   - The action runs with GITHUB_TOKEN, so the Claude GitHub App is not needed (see github_token).
 #
 # Constraints kept from the earlier setup:
@@ -214,7 +217,7 @@ jobs:
             - If the new code fixes one, put its id into resolved_prior: the bracketed text at the start of its line in context.md, such as c1234567890 or u1a2b3c4d.
 
             Output
-            - path is relative to the repository root. line is the line number in the head version, confirmed with Read. Pick a line inside the diff (an added line or a nearby context line). Use start_line for a multi-line range.
+            - path is relative to the repository root. line is the line number in the head version, confirmed with Read, or with `git show HEAD:<path>` for the rules and settings files whose BASE copies are in the working tree. Pick a line inside the diff (an added line or a nearby context line). Use start_line for a multi-line range.
             - title: one short sentence naming the problem.
             - replaces: only for a finding you report again (see Earlier findings), the id of the earlier one.
             - body: what goes wrong (a concrete input or sequence), why, and how to fix it. Three to six sentences. Quote the rule when citing AGENTS.md or CLAUDE.md.
