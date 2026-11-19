@@ -200,6 +200,10 @@ PR の自動レビュー（Codex と Claude のコードレビュー）が読む
 
 - `pull_request_target` を使わない。fork のコードを base の secrets 付きで動かすことになり、
   「fork PR から secrets に到達する経路が無い」という前提が壊れる。
+- self-hosted runner をこの repo に登録せず、どのワークフローの `runs-on` にも self-hosted の
+  ラベルを書かない。fork PR は自分の版のワークフローを動かすので、登録された runner を直接指定
+  できる。外部の貢献者への承認ゲートを一度でも通せば、そのマシンで任意のコードが動き、次の job まで
+  残るファイルも置ける。GitHub ホストのランナーは public repo では無料なので、移す理由も無い。
 - レビュー用ワークフロー（`claude-code-review.yml`）の `anthropics/claude-code-action` には
   `github_token: ${{ secrets.GITHUB_TOKEN }}` を渡し、**Claude GitHub App のトークンに戻さない**。
   App のトークンを使うと、action はワークフローファイルが default branch（`main`）上の版と
