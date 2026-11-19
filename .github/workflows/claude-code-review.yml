@@ -3,18 +3,21 @@
 # This file is identical in mojiroku, babyloop-dev and shape-polydisperse-granular-dev.
 # Change all three together. Background and measurements: daichi-hotta/ops#61.
 #
-# Runner: the job runs on ubuntu-latest unless the repository variable REVIEW_RUNS_ON holds a
-# JSON label list, such as ["self-hosted","ci-runner"] for Daichi's self-hosted runners
-# (shape-polydisperse-granular-dev docs/compute-and-storage.md); a bare label fails before any
-# step runs. Deleting the variable sends the next run back to ubuntu-latest. While no runner is
-# online, the job waits in the queue for up to 24 h and posts nothing; a runner lost mid-job (a
-# restart, say) leaves only the red check, without the "did not finish" summary. The runner
-# needs git, gh, curl and unzip; the action installs Bun and Claude Code. On a self-hosted
-# runner each job gets a fresh HOME under RUNNER_TEMP, so no ~/.claude from another job reaches
-# this one. A job can read the registration keys of every runner of its user; if one ever
+# Runner: the job runs on ubuntu-latest unless the repository is private and the repository
+# variable REVIEW_RUNS_ON holds a JSON label list, such as ["self-hosted","ci-runner"] for
+# Daichi's self-hosted runners (shape-polydisperse-granular-dev docs/compute-and-storage.md); a
+# bare label fails before any step runs. Deleting the variable sends the next run back to
+# ubuntu-latest. While no runner is online, the job waits in the queue for up to 24 h and posts
+# nothing; a runner lost mid-job (a restart, say) leaves only the red check, without the "did not
+# finish" summary. The runner needs git, gh, curl and unzip; the action installs Bun and Claude
+# Code. On a self-hosted runner each job gets a fresh HOME under RUNNER_TEMP, so no ~/.claude
+# from another job reaches this one, and the last step empties the workspace, which would keep
+# the PR's files and this job's token (claude-code-action writes it into the origin URL in
+# .git/config). A job can read the registration keys of every runner of its user; if one ever
 # appears in a review comment, remove all of that user's runners and register them again.
 # Never register a self-hosted runner to a public repository (mojiroku): a fork PR runs its
-# own copy of this file and can name the runner directly, whatever the variable says.
+# own copy of this file and can name the runner directly, whatever the variable says. The
+# private check only keeps this copy of the job off such a runner.
 #
 # Design (each point answers a failure of the earlier setup, removed or replaced on 2026-10-22):
 #   - Claude only reads and returns JSON (--json-schema). The last step posts the result.
@@ -69,7 +72,7 @@ concurrency:
 jobs:
   review:
     if: github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft
-    runs-on: ${{ fromJSON(vars.REVIEW_RUNS_ON || '"ubuntu-latest"') }}
+    runs-on: ${{ github.event.repository.private && fromJSON(vars.REVIEW_RUNS_ON || '"ubuntu-latest"') || 'ubuntu-latest' }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -498,3 +501,8 @@ jobs:
             if (fixed.length) lines.push('', '**Fixed since the last review**', ...fixed);
             lines.push(...summaryOnlySection(summaryOnly));
             await upsertSummary(lines.join('\n'));
+
+      # A self-hosted runner keeps the workspace between jobs (see Runner above).
+      - name: Empty the workspace on a self-hosted runner
+        if: always() && runner.environment == 'self-hosted'
+        run: find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
