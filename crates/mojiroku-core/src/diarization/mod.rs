@@ -106,6 +106,36 @@ pub fn carry_display_names(
     new: &[(Speaker, Vec<f32>)],
     min_cos: f32,
 ) -> Vec<(String, Option<String>)> {
+    let mut carried: Vec<Option<String>> = vec![None; new.len()];
+    for (oi, ni) in match_by_voice(old, new, min_cos) {
+        carried[ni] = old[oi].0.display_name.clone();
+    }
+    new.iter()
+        .enumerate()
+        .map(|(ni, (sp, _))| (sp.id.clone(), carried[ni].take()))
+        .collect()
+}
+
+/// 旧話者と新話者を声紋で 1 対 1 に対応づけ、`(旧 speaker_id, 新 speaker_id)` を返す。
+/// 照合の規則は [`carry_display_names`] と同じ。話者分離のやり直しで、手で直した発言の
+/// 話者を引き継ぐときの最後の手がかりに使う（ADR-0048）。
+pub fn match_speaker_ids(
+    old: &[(Speaker, Vec<f32>)],
+    new: &[(Speaker, Vec<f32>)],
+    min_cos: f32,
+) -> Vec<(String, String)> {
+    match_by_voice(old, new, min_cos)
+        .into_iter()
+        .map(|(oi, ni)| (old[oi].0.id.clone(), new[ni].0.id.clone()))
+        .collect()
+}
+
+/// 声紋 cosine の大きいペアから貪欲に 1 対 1 で対応づけ、`(旧の添字, 新の添字)` を返す。
+fn match_by_voice(
+    old: &[(Speaker, Vec<f32>)],
+    new: &[(Speaker, Vec<f32>)],
+    min_cos: f32,
+) -> Vec<(usize, usize)> {
     // 全ペアの cosine を作り、降順に貪欲マッチ（1 対 1）。
     let mut pairs: Vec<(f32, usize, usize)> = Vec::new();
     for (oi, (_, ov)) in old.iter().enumerate() {
@@ -122,20 +152,17 @@ pub fn carry_display_names(
     pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut old_used = vec![false; old.len()];
-    let mut carried: Vec<Option<String>> = vec![None; new.len()];
     let mut new_matched = vec![false; new.len()];
+    let mut matched = Vec::new();
     for (_, oi, ni) in pairs {
         if old_used[oi] || new_matched[ni] {
             continue;
         }
         old_used[oi] = true;
         new_matched[ni] = true;
-        carried[ni] = old[oi].0.display_name.clone();
+        matched.push((oi, ni));
     }
-    new.iter()
-        .enumerate()
-        .map(|(ni, (sp, _))| (sp.id.clone(), carried[ni].take()))
-        .collect()
+    matched
 }
 
 /// 話者分離の抽象。

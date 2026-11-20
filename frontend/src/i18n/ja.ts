@@ -251,6 +251,8 @@ const ja = {
     cancel: "中断",
     transcribeCompleted: "文字起こしが完了しました",
     diarizeCompleted: "話者分離が完了しました",
+    correctionsUnmapped: (n: number) =>
+      `手で直した発言のうち ${n} 件は、選んだ話者が見つからず「?」に戻しました`,
     failedToast: "処理に失敗しました",
     // stage キー → 表示名（core の on_progress の stage 名と一致。未知キーは stageLabel でフォールバック）。
     stages: {
@@ -346,7 +348,7 @@ const ja = {
     runDiarizeDesc: "誰が話したかを後から解析して発話に割り当てます。",
     rerunDiarize: "話者分離をやり直す",
     rerunDiarizeDesc:
-      "話者を解析し直します。付けた名前は、声が近ければ引き継ぎます。会議では自分の発言はそのままです。",
+      "話者を解析し直します。付けた名前は、声が近ければ引き継ぎます。手で直した発言も引き継ぎます。会議では自分の発言はそのままです。",
     summaryStale: "内容が古い可能性",
     summaryStaleTitle: "文字起こしまたは話者が更新されました。作り直しをおすすめします。",
     aiCreate: "AIで作成",

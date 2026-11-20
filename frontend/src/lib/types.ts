@@ -88,6 +88,8 @@ export interface JobUpdate {
   done: number;
   total: number | null;
   error: string | null;
+  /** 話者分離のやり直しで引き継げなかった手動訂正の数（done のときだけ。ADR-0048）。 */
+  unmapped_corrections?: number | null;
 }
 
 export interface Progress {
