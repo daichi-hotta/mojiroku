@@ -11,6 +11,7 @@ pub mod schemas;
 pub mod audio;
 pub mod calendar;
 pub mod cancel;
+pub mod crosstalk;
 pub mod diarization;
 pub mod export;
 pub mod ffi_guard;
@@ -378,8 +379,14 @@ pub fn transcribe_meeting_dual_track_with_options(
     // 自分（マイク）: STT のみ。
     // mic 側は %を抑止（会議は system STT/diarization/mic STT/merge と多段。mic の 0→100 だけ
     //    出すと全体進捗と誤読される。会議は経過時間で示す・emit_pct=false）。
-    let mic = transcribe_file_impl(mic_path, models_dir, options, on_progress, false)?;
+    let mut mic = transcribe_file_impl(mic_path, models_dir, options, on_progress, false)?;
     cancel::check()?;
+    // Remote voices leaking into the mic (speakers instead of headphones) come back as faint
+    // duplicate or invented mic text; drop those segments before merging (ADR-0049).
+    if !system.segments.is_empty() {
+        crosstalk::filter_mic_track(&mut mic, mic_path, system_path, mic_offset_ms)?;
+        cancel::check()?;
+    }
     // ソース合成（マイク=self、システム=diarization 話者を保持、時系列マージ）。
     // system 話者 id は merge_tracks で不変＝声紋（system_embeddings）の id とも整合する。
     let (transcript, speakers) =
