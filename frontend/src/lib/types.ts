@@ -129,6 +129,17 @@ export interface RecordingDetail {
   active_job?: Job | null;
 }
 
+/**
+ * One saved live caption of a meeting, exactly as shown during recording (ADR-0048).
+ * Rust 側 store::SavedLiveCaption に対応。`caption_id` is the same ID that saved live
+ * translations use as `source_id`. `committed=false` is the unfinished line at Stop.
+ */
+export interface SavedLiveCaption {
+  caption_id: number;
+  text: string;
+  committed: boolean;
+}
+
 /** 履歴一覧の 1 行（#109）。Rust 側 store::RecordingRow に対応。 */
 export interface RecordingRow {
   recording: Recording;

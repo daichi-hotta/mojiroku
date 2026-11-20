@@ -100,7 +100,19 @@ impl SqliteStore {
         rec: &Recording,
         translations: &[SavedLiveTranslation],
     ) -> Result<()> {
+        self.insert_recording_with_live_history(rec, translations, &[])
+    }
+
+    /// Save a meeting with its live translations and live transcript in one transaction
+    /// before enqueueing STT (ADR-0038, ADR-0048). Nothing is saved if any part fails.
+    pub fn insert_recording_with_live_history(
+        &self,
+        rec: &Recording,
+        translations: &[SavedLiveTranslation],
+        captions: &[SavedLiveCaption],
+    ) -> Result<()> {
         validate_live_translations(translations)?;
+        validate_live_captions(captions)?;
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         tx.execute(
@@ -121,6 +133,7 @@ impl SqliteStore {
             params![rec.title.as_deref().unwrap_or(""), rec.id],
         )?;
         translation::insert_rows(&tx, &rec.id, translations)?;
+        live_caption::insert_rows(&tx, &rec.id, captions)?;
         tx.commit()?;
         Ok(())
     }

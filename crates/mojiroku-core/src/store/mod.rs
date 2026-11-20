@@ -17,12 +17,14 @@ use crate::schemas::{ActionItem, Recording, Segment, SourceType, Speaker, Summar
 
 mod embedding;
 mod job;
+mod live_caption;
 mod recording;
 mod search;
 mod speaker;
 mod translation;
 use embedding::{blob_to_f32, dot, f32_to_blob, l2_mean};
 pub use job::TITLE_JOB_KIND;
+pub use live_caption::{validate_live_captions, LiveCaptionArchive, SavedLiveCaption};
 pub use translation::{validate_live_translations, SavedLiveTranslation};
 
 /// 履歴詳細。`Transcript`/`Summary` に `recording_id` を足さず集約だけ持つ DTO。
@@ -142,7 +144,7 @@ pub struct SqliteStore {
     conn: Mutex<Connection>,
 }
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// 最小エンロール尺（ms）。これ未満の話者は声紋が不安定で照合/登録の対象外（ADR-0018, 暫定）。
 /// スパイクで「短い音声では同一人物でも一致が崩れる」ことを観測したため尺でゲートする。
@@ -378,6 +380,11 @@ fn migrate(conn: &Connection) -> Result<()> {
     // v7: saved live-caption translations, separate from the final transcript.
     if version < 7 {
         conn.execute_batch(translation::DDL)?;
+    }
+
+    // v8: the saved live (realtime) transcript, separate from the final transcript (ADR-0048).
+    if version < 8 {
+        conn.execute_batch(live_caption::DDL)?;
     }
 
     // 全段階の後ろで一括 bump。途中失敗時は version<2 のまま再実行され、

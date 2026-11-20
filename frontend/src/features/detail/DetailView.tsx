@@ -54,6 +54,7 @@ import { SpeakerPanel } from "./SpeakerPanel";
 import { SharePopover } from "./SharePopover";
 import { TemplateModal } from "./TemplateModal";
 import { AskDrawer } from "./AskDrawer";
+import { SavedLiveTranscript } from "./SavedLiveTranscript";
 import { SavedTranslations } from "./SavedTranslations";
 import { AudioPlayer, type AudioPlayerHandle } from "./AudioPlayer";
 import { Markdown } from "@/lib/markdown";
@@ -196,7 +197,7 @@ export function DetailView({ id }: { id: string }) {
   }, [audioSrc]);
 
 
-  const [tab, setTab] = useState<"transcript" | "chapters" | "translations">("transcript");
+  const [tab, setTab] = useState<"transcript" | "live" | "chapters" | "translations">("transcript");
   const [translateOn, setTranslateOn] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [presetTemplate, setPresetTemplate] = useState("minutes");
@@ -1016,7 +1017,12 @@ export function DetailView({ id }: { id: string }) {
             <TabButton active={tab === "transcript"} onClick={() => setTab("transcript")}>
               {t.detail.tabs.transcript}
             </TabButton>
-            {/* ライブ翻訳は会議モードにしか無い（#107）。他の録音では空のタブになるだけなので出さない。 */}
+            {/* ライブ文字起こし・ライブ翻訳は会議モードにしか無い（#107, #154）。他の録音では空のタブになるだけなので出さない。 */}
+            {rec.source_type === "live" && (
+              <TabButton active={tab === "live"} onClick={() => setTab("live")}>
+                {t.detail.tabs.live}
+              </TabButton>
+            )}
             {rec.source_type === "live" && (
               <TabButton active={tab === "translations"} onClick={() => setTab("translations")}>
                 {t.meeting.translation.savedTitle}
@@ -1110,7 +1116,7 @@ export function DetailView({ id }: { id: string }) {
             </div>
           )}
 
-          {tab === "translations" ? <SavedTranslations key={id} id={id} /> : tab === "chapters" && MOCK_PREVIEW ? (
+          {tab === "live" ? <SavedLiveTranscript key={id} id={id} /> : tab === "translations" ? <SavedTranslations key={id} id={id} /> : tab === "chapters" && MOCK_PREVIEW ? (
             <div>
               <div className="mb-3 flex items-center justify-between">
                 <div className="flex items-center gap-2">
