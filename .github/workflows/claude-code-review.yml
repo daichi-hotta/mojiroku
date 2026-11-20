@@ -56,6 +56,13 @@
 #     dotagents only) turns it on. Without the secret the summary footer says the check is off; an
 #     expired or wrong token makes the summary warn that writing was not checked. The token goes
 #     over HTTPS because the self-hosted runner image has no ssh client. Writing findings are P2.
+#   - Like Codex, the job reacts 👍 on the PR when nothing is open (2026-11-20). That means: no new
+#     findings or writing notes, every earlier finding marked fixed, nothing under "Findings outside
+#     the diff", zero blocked tool calls, and a writing check that did not fail. Each run removes
+#     the 👍 before Claude starts, so it does not stand for an older commit during a review. While a
+#     run waits for a runner, or for a draft PR (no review runs), the old 👍 stays: trust it only
+#     when the summary names the PR's head commit. An edit to the PR description starts no run, so
+#     the 👍 does not cover it. A finding left unfixed on purpose keeps the 👍 away.
 #
 # Constraints kept from the earlier setup:
 #   - Fork PRs are skipped with a job-level `if:` (a skipped job reports success, so this
@@ -167,6 +174,18 @@ jobs:
               return;
             }
             const BOT = 'github-actions[bot]';
+            // The 👍 of an earlier commit must not stand while this one is reviewed (see Design).
+            // If this fails, the post step still removes it on a result that is not clean.
+            try {
+              const thumbs = await github.paginate(github.rest.reactions.listForIssue, {
+                owner, repo, issue_number: pr.number, content: '+1', per_page: 100,
+              });
+              for (const r of thumbs.filter((t) => t.user && t.user.login === BOT)) {
+                await github.rest.reactions.deleteForIssue({ owner, repo, issue_number: pr.number, reaction_id: r.id });
+              }
+            } catch (e) {
+              core.warning(`Could not remove the earlier 👍: ${e.message}`);
+            }
             // Our JSON block is the last marker in the summary; Claude's text cannot contain one (see clean).
             function readUnplaced(body) {
               const tag = '<!-- claude-review:unplaced ';
@@ -422,8 +441,25 @@ jobs:
             });
             const previous = issueComments.find((c) => c.user && c.user.login === BOT && c.body.includes(SUMMARY));
 
+            // A 👍 on the PR says this commit was reviewed with nothing open (see Design). On a result
+            // that is not clean it is removed before the summary is posted, and a failure is noted there.
+            const notes = [];
+            async function removeThumbsUp() {
+              try {
+                const thumbs = await github.paginate(github.rest.reactions.listForIssue, {
+                  owner, repo, issue_number: pr.number, content: '+1', per_page: 100,
+                });
+                for (const r of thumbs.filter((t) => t.user && t.user.login === BOT)) {
+                  await github.rest.reactions.deleteForIssue({ owner, repo, issue_number: pr.number, reaction_id: r.id });
+                }
+              } catch (e) {
+                core.warning(`Could not remove the earlier 👍: ${e.message}`);
+                notes.push('⚠️ Removing the 👍 failed. A 👍 still on this PR does not stand for this commit. The run log has the error.', '');
+              }
+            }
+
             async function upsertSummary(text) {
-              const body = [SUMMARY, '## Claude review', '', ...blocked, ...unfetched, text, '', footer].join('\n');
+              const body = [SUMMARY, '## Claude review', '', ...blocked, ...unfetched, ...notes, text, '', footer].join('\n');
               if (previous) {
                 await github.rest.issues.updateComment({ owner, repo, comment_id: previous.id, body });
               } else {
@@ -452,6 +488,7 @@ jobs:
             if (!review || !Array.isArray(review.findings)) {
               // Keep findings that live only in the previous summary, so a failed run does not drop them.
               const note = `⚠️ The review of \`${short}\` did not finish. Nothing was checked; see the run log.`;
+              await removeThumbsUp();
               await upsertSummary([note, ...summaryOnlySection(earlier)].join('\n'));
               core.setFailed('Claude returned no structured review.');
               return;
@@ -519,6 +556,8 @@ jobs:
             // the resolved marker, so the next context step leaves it out. A fixed summary-only finding is
             // no longer carried. Earlier findings stay listed until Claude reports them fixed.
             const ids = new Set();
+            // Ids of inline findings this run marked as fixed or closed as reported again.
+            const marked = new Set();
             for (const r of review.resolved_prior || []) {
               const found = String(r).match(/\b[cu][0-9a-f]{8,}\b/g) || [];
               if (!found.length) core.warning(`resolved_prior entry without an id: ${String(r).slice(0, 200)}`);
@@ -539,6 +578,7 @@ jobs:
                     owner, repo, comment_id: c.id,
                     body: `${c.body}\n\n✅ Fixed in \`${short}\`, according to the Claude review.\n${RESOLVED} ${sha} -->`,
                   });
+                  marked.add(id);
                   fixed.push(fixedLine(c));
                 } catch (e) {
                   core.warning(`Could not mark comment ${c.id} as fixed: ${e.message}`);
@@ -562,6 +602,7 @@ jobs:
                   owner, repo, comment_id: c.id,
                   body: `${c.body}\n\n↪️ Reported again on \`${short}\` in a newer comment.\n${RESOLVED} superseded ${sha} -->`,
                 });
+                marked.add(m[0]);
               } catch (e) {
                 core.warning(`Could not close comment ${c.id} as reported again: ${e.message}`);
               }
@@ -570,9 +611,12 @@ jobs:
             const summaryOnly = [...unplaced, ...carried];
 
             const n = (s) => findings.filter((f) => f.severity === s).length;
+            // Inline findings from earlier runs that are not marked as fixed or reported again.
+            const stillOpen = [...open.keys()].filter((id) => !marked.has(id));
             const lines = [findings.length
               ? `Commit \`${short}\`: ${findings.length} new finding(s) (P0 ${n('P0')} · P1 ${n('P1')} · P2 ${n('P2')}).`
               : `Commit \`${short}\`: no new findings.`];
+            if (stillOpen.length) lines.push('', `Earlier findings still open on this PR: ${stillOpen.length}.`);
             lines.push('', clean(review.summary));
             // Notes on the PR description and commit messages, which have no diff line. Each run lists them anew.
             const writing = Array.isArray(review.writing) ? review.writing : [];
@@ -584,7 +628,25 @@ jobs:
             }
             if (fixed.length) lines.push('', '**Fixed since the last review**', ...fixed);
             lines.push(...summaryOnlySection(summaryOnly));
+
+            // The 👍 needs a full review of this commit and nothing open on the PR (see Design).
+            const nothingOpen = !findings.length && !writing.length && !stillOpen.length && !summaryOnly.length
+              && denials !== null && !denials.length && whittle !== 'failed';
+            if (!nothingOpen) await removeThumbsUp();
             await upsertSummary(lines.join('\n'));
+            if (nothingOpen) {
+              try {
+                // After a push during this run, the newer commit's run decides the 👍.
+                const { data: now } = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
+                if (now.head.sha === sha) {
+                  await github.rest.reactions.createForIssue({ owner, repo, issue_number: pr.number, content: '+1' });
+                } else {
+                  core.notice(`No 👍: ${short} is no longer the PR head (${now.head.sha.slice(0, 7)}).`);
+                }
+              } catch (e) {
+                core.warning(`Could not add the 👍: ${e.message}`);
+              }
+            }
 
       # A self-hosted runner keeps the workspace between jobs (see Runner above).
       - name: Empty the workspace on a self-hosted runner
